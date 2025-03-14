@@ -6,7 +6,7 @@ set -u                  # treat unset variable as error
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 
-CMD=(setup_host debootstrap run_chroot build_iso)
+CMD=(setup_host debootstrap prechroot chr_setup_host chr_install_pkg chr_customize_image chr_custom_conf chr_postpkginst chr_build_image chr_finish_up postchroot build_iso)
 
 DATE=`TZ="UTC" date +"%y%m%d-%H%M%S"`
 
@@ -107,7 +107,7 @@ function debootstrap() {
     sudo debootstrap --arch=amd64 --variant=minbase $TARGET_UBUNTU_VERSION chroot $TARGET_UBUNTU_MIRROR
 }
 
-function run_chroot() {
+function prechroot() {
     echo "=====> running run_chroot ..."
 
     chroot_enter_setup
@@ -119,10 +119,52 @@ function run_chroot() {
         sudo ln -f $SCRIPT_DIR/config.sh chroot/root/config.sh
     fi
 
-    # Launch into chroot environment to build install image.
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh -
+}
 
-    # Cleanup after image changes
+# function run_chroot() {
+
+#     # Launch into chroot environment to build install image.
+#     sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh -
+
+# }
+
+function chr_setup_host() {
+    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh setup_host
+    
+}
+
+function chr_install_pkg() {
+    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh install_pkg
+    
+}
+
+function chr_customize_image() {
+    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh customize_image
+    
+}
+
+function chr_custom_conf() {
+    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh custom_conf
+    
+}
+
+function chr_postpkginst() {
+    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh postpkginst
+    
+}
+
+function chr_build_image() {
+    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh build_image
+    
+}
+
+function chr_finish_up() {
+    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh finish_up
+    
+}
+
+function postchroot() {
+       # Cleanup after image changes
     sudo rm -f chroot/root/chroot_build.sh
     sudo rm -f chroot/root/default_config.sh
     if [[ -f "chroot/root/config.sh" ]]; then
@@ -130,6 +172,7 @@ function run_chroot() {
     fi
 
     chroot_exit_teardown
+
 }
 
 function build_iso() {

@@ -6,7 +6,7 @@ set -u                  # treat unset variable as error
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 
-CMD=(setup_host install_pkg build_image finish_up)
+CMD=(setup_host install_pkg customize_image custom_conf postpkginst build_image finish_up)
 
 function help() {
     # if $1 is set, use $1 as headline message in help()
@@ -133,34 +133,23 @@ function install_pkg() {
     apt-get install -y --no-install-recommends $TARGET_KERNEL_PACKAGE
 
     # graphic installer - ubiquity
-    apt-get install -y \
-        ubiquity \
-        ubiquity-casper \
-        ubiquity-frontend-gtk \
-        ubiquity-slideshow-ubuntu \
-        ubiquity-ubuntu-artwork
+    #apt-get install -y \
+    #    ubiquity \
+    #    ubiquity-casper \
+    #    ubiquity-frontend-gtk \
+    #    ubiquity-slideshow-ubuntu \
+    #    ubiquity-ubuntu-artwork
 
     # Call into config function
-    customize_image
+    
+}
 
+function postpkginst() {
     # remove unused and clean up apt cache
     apt-get autoremove -y
 
     # final touch
     dpkg-reconfigure locales
-
-    # network manager
-    cat <<EOF > /etc/NetworkManager/NetworkManager.conf
-[main]
-rc-manager=none
-plugins=ifupdown,keyfile
-dns=systemd-resolved
-
-[ifupdown]
-managed=false
-EOF
-
-    dpkg-reconfigure network-manager
 
     apt-get clean -y
 }
@@ -179,7 +168,7 @@ function build_image() {
     cp /boot/initrd.img-**-**-generic casper/initrd
 
     # memtest86
-    wget --progress=dot https://memtest.org/download/v7.00/mt86plus_7.00.binaries.zip -O install/memtest86.zip
+    wget --progress=dot https://memtest.org/download/v7.20/mt86plus_7.20.binaries.zip -O install/memtest86.zip
     unzip -p install/memtest86.zip memtest64.bin > install/memtest86+.bin
     unzip -p install/memtest86.zip memtest64.efi > install/memtest86+.efi
     rm -f install/memtest86.zip
@@ -193,15 +182,10 @@ search --set=root --file /ubuntu
 insmod all_video
 
 set default="0"
-set timeout=30
+set timeout=3
 
-menuentry "Try Ubuntu FS without installing" {
-    linux /casper/vmlinuz boot=casper nopersistent toram quiet splash ---
-    initrd /casper/initrd
-}
-
-menuentry "Install Ubuntu FS" {
-    linux /casper/vmlinuz boot=casper only-ubiquity quiet splash ---
+menuentry "Inautomatic Ubuntu" {
+    linux /casper/vmlinuz boot=casper systemd.mask=udisks2 nopersistent toram noprompt ---
     initrd /casper/initrd
 }
 
