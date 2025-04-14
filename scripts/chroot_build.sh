@@ -315,5 +315,5 @@ for ((ii=$start_index; ii<$end_index; ii++)); do
     ${CMD[ii]}
 done
 
-echo "$0 - Initial build is done!"
+echo "$0 - Step is complete!"
 

@@ -36,12 +36,23 @@ export TARGET_PACKAGE_REMOVE="
     os-prober \
 "
 
+# Used to version the configuration.  If breaking changes occur, manual
+# updates to this file from the default may be necessary.
+export CONFIG_FILE_VERSION="0.4"
+
 HOMEPATH="/home/inauto"
 ETCPATH="/etc/inauto"
 USRPATH="/usr/storage"
 
 FINDHOME="find-and-mount-home.sh"
 FINDSTOR="find-and-mount-stor.sh"
+
+EXECFILESINFOLDER="exec-files-in-folder.sh"
+
+ONLOGIN="on_login"
+ONSTART="on_start"
+
+XDG_CONFIG_DIRS="/etc/xdg/xdg-xubuntu"
 
 
 function custom_conf() {
@@ -50,13 +61,19 @@ function custom_conf() {
     mkdir -p $HOMEPATH
     mkdir -p $ETCPATH
     
-    find_flash
+    make_find_flash_script
     
-    network_conf
+    net_config
     ssh_conf
 
+    #enable_on_screen_kbd
+    enable_vnc
+
     #apt-get install -y sshpass
-    disable_services
+    #disable_network
+    disable_updates
+    disable_oopsie
+    disable_automount
     install_ldk
 
     service_mounthome
@@ -64,13 +81,13 @@ function custom_conf() {
     service_mountnetinterfaces
     service_startapp
 
-    mkdir -p /etc/systemd/journald.conf.d
+    exec_on_start
+    exec_files_in_folder
+
     journald_conf
 
     systemctl daemon-reload
     systemctl enable MountHome.service MountExtNetDriver.service MountNetInterfaces.service StartApp.service hasplmd.service aksusbd.service
-
-    mc_selected_editor
 
     echo write the passwd: 123456
     passwd root
@@ -93,7 +110,7 @@ SFTP_USER="orpo_sftp"
 SFTP_PASS="InAuto2024"
 SFTP_PORT="22"
 REMOTE_FILE="/uploads/images/ubuntu_livecd_files_for_build/aksusbd_10.12-1_amd64.deb"
-LOCAL_DIR="/etc/inauto"
+LOCAL_DIR="$ETCPATH"
 
 echo "downloading file"
 # Use sshpass with scp to download the file
@@ -103,45 +120,27 @@ dpkg -i "$LOCAL_DIR/aksusbd_10.12-1_amd64.deb"
 
 }
 
+function exec_files_in_folder() {
+    echo "#!/bin/bash
 
-function disable_services() {
-    ### systemd-networkd.service is desable !!!
-    systemctl disable systemd-networkd.socket
-    systemctl disable systemd-networkd.service
-    ### This daemon is similar to NetworkManager, but the limited nature of systemd-networkd
-    systemctl disable networkd-dispatcher.service
-    systemctl disable systemd-networkd-wait-online.service
-    ### DNS !!! & ### tokmakov.msk.ru/blog/item/522
-    # systemctl disable systemd-resolved.service
-    # apt install -y resolvconf
-    # systemctl enable resolvconf
+find $HOMEPATH/\$1 -maxdepth 1 -type f -executable | sort | while read script; do 
+echo start executing \"\$script\"
+    \"\$script\"
+echo executing \"\$script\" is complete
+done
+" | sudo tee "$ETCPATH/$EXECFILESINFOLDER"
 
-    ### mounting a partition without a file system <system boot delay>
-    #systemctl disable var-crash.mount
-    #systemctl disable var-log.mount
-
-    ### демон для управления установкой обновлений прошивки в системах на базе Linux
-    systemctl disable fwupd-offline-update.service
-    systemctl disable fwupd.service
-    systemctl disable fwupd-refresh.service
-    ### программная среда для обеспечения геопространственной осведомленности в приложениях
-    # systemctl disable geoclue.service
-    ### собирает информацию о сбое ядра, отправляет извлеченную подпись в kerneloops.org & canonical
-    systemctl disable kerneloops.service
-    systemctl disable whoopsie.service
-    ### dbus and automount ???
-    systemctl mask udisks2
-    systemctl disable udisks2.service
-    ### инструмент автоматической установки обновлений
-    systemctl disable unattended-upgrades.service
-    systemctl disable secureboot-db.service
-
+chmod 755 "$ETCPATH/$EXECFILESINFOLDER"
 }
 
 
-function network_conf() {
-    netwrokmanager_conf
-    dpkg-reconfigure network-manager
+function exec_on_start() {
+    echo "[Desktop Entry]
+Name=Exec scripts in $HOMEPATH/$ONLOGIN
+Exec=$ETCPATH/$EXECFILESINFOLDER $ONLOGIN
+StartapNotify=false
+Type=Application
+" | sudo tee "${XDG_CONFIG_DIRS}"/autostart/exec_on_start.desktop
 }
 
 # Package customisation function.  Update this function to customize packages
@@ -149,7 +148,8 @@ function network_conf() {
 function customize_image() {
     # install graphics and desktop
     apt-get install -y \
-        xubuntu-desktop-minimal
+        xubuntu-desktop
+        #-minimal
         #xubuntu-wallpapers
         #plymouth-themes 
 
@@ -159,7 +159,6 @@ function customize_image() {
         terminator \
         apt-transport-https \
         curl \
-        vim \
         nano \
         less \
         mc \
@@ -171,8 +170,9 @@ function customize_image() {
         mtools \
         sshpass \
         iputils-ping \
+        scite \
         libxcb-cursor0
-
+        #vim \
 
     # purge
     apt-get purge -y \
@@ -186,60 +186,71 @@ function customize_image() {
         hitori
 }
 
-# Used to version the configuration.  If breaking changes occur, manual
-# updates to this file from the default may be necessary.
-export CONFIG_FILE_VERSION="0.4"
-
-function mc_selected_editor() {
-    cat <<EOF > /root/.selected_editor
-# Generated by /usr/bin/select-editor
-SELECTED_EDITOR="/usr/bin/mcedit"
-EOF
-
-#     cat <<EOF > /home/inauto/.selected_editor
-# SELECTED_EDITOR="/usr/bin/mcedit"
-# EOF
-
+function net_config() {
+    apt-get install -y netplan.io util-linux
+    # netplan.io : для настройки сетевых интерфейсов.
+    # util-linux : содержит утилиты для работы с разделами (например, blkid).
 }
 
-function netwrokmanager_conf() {
-    # network manager
-    cat <<EOF > /etc/NetworkManager/NetworkManager.conf
-[main]
-plugins=ifupdown,keyfile
-### ++ disable polkit
-###auth-polkit=root-only
-### ++ quets after performing initial network configuration (Wi-Fi, WWAN, Bluetooth, ADSL, and PPPoE interfaces cannot be preserved)
-configure-and-quit=true
-### systemd-resolved is chosen automatically ???
-dns=default
-### disable systemd-resolved
-rc-manager=resolvconf
-### disable systemd-resolved
-systemd-resolved=false
-### ++ settings this value to 1 means to try action once without retry
-autoconnect-retries-default=1
+function enable_vnc() {
+    sudo apt-get install -y x11vnc xfce4-goodies xfce4-settings xfce4-session xfce4-panel libxfconf-0-3 dbus dbus-x11
+    # x11vnc : сервер VNC для подключения к текущей X-сессии.
+    # xfce4-vnc-plugin : плагин для интеграции VNC с XFCE.
+    # xfce4-settings : настройки XFCE (для управления плагинами).
 
-[ifupdown]
-managed=false
-EOF
-}
+    # настройка запуска без пароля
+    #echo "x11vnc -forever -loop -noxdamage -nopw -display :0" | sudo tee /etc/init.d/x11vnc
+    #echo "x11vnc -forever -loop -noxdamage -usepw -display :0" | sudo tee /etc/init.d/x11vnc
+    # установка пароля:
+    # x11vnc -storepasswd /etc/x11vnc.pass
 
-function journald_conf() {
-    cat <<EOF > /etc/systemd/journald.conf.d/journald.conf
-[Journal]
-SplitMode=false
-SystemMaxUse=50M
-SystemMaxFileSize=50M
-ForwardToSyslog=no
-EOF
+    echo "dbus-launch --exit-with-session" | sudo tee -a /etc/X11/Xsession.d/40xfce4
+    
+    # добавить в автозагрузку скрипт
+    echo "[Desktop Entry]
+Name=X11VNC Server
+Exec=/usr/bin/x11vnc -forever -loop -noxdamage -nopw  -display :0
+Type=Application
+" | sudo tee "${XDG_CONFIG_DIRS}"/autostart/x11vnc.desktop
+    
+    # Разрешите входящие соединения на порт VNC (по умолчанию 5900 )
+    sudo ufw allow 5900/tcp
+    sudo ufw enable
+
+    # /usr/bin/x11vnc -forever -loop -usepw -display :0
+
+#     mkdir -p /usr/lib/x86_64-linux-gnu/xfce4/xfce4-session-save
+
+#     echo "[Desktop Entry]
+# Name=X11 VNC
+# Exec=xfconf-query -c xfce4-session -p /General/SavedSetup | xargs xfce4-session-save -l -p
+
+# Type=Application
+# " | sudo tee /etc/xdg/autostart/x11vnc.desktop
+#     # чтобы VNC интегрирован с текущей сессией XFCE:
+
+    # автозапуск
+#     echo "[Unit]
+# Description=X11VNC Server
+# After=network.target display-manager.service
+
+# [Service]
+# Type=forking
+# ExecStart=/usr/bin/x11vnc -forever -loop -noxdamage -nopw -display :0
+# Restart=on-failure
+# User=root
+
+# [Install]
+# WantedBy=multi-user.target" | sudo tee /etc/systemd/system/x11vnc.service
+
+    # sudo systemctl enable x11vnc.service
 }
 
 function service_mounthome() {
     fname='/etc/systemd/system/MountHome.service'
     cat <<EOF > $fname
 [Unit]
-Description=find and mount device with .inautolock
+Description=Find and mount device with .inautolock
 After=local-fs.target
 
 [Service]
@@ -258,36 +269,39 @@ function service_mountnetinterfaces() {
     fname='/etc/systemd/system/MountNetInterfaces.service'
     cat <<EOF > $fname
 [Unit]
-Description=MountNetInterfaces
+Description=Exec scripts in $HOMEPATH/$ONSTART/oneshot
 After=MountHome.service network.target network-online.target MountExtNetDriver.service
 
 [Service]
 Type=oneshot
-ExecStart=$HOMEPATH/net/ifaces.sh
+ExecStart="$ETCPATH"/"$EXECFILESINFOLDER" "$ONSTART"/oneshot 
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 chmod 644 $fname 
+
+#ExecStart=$HOMEPATH/$ONSTART/configure_network
 }
 
 function service_mountlextnetdriver() {
     fname='/etc/systemd/system/MountExtNetDriver.service'
     cat <<EOF > $fname
 [Unit]
-Description=MountExtNetDriver
+Description=Apply network drivers
 After=MountHome.service
 Before=networking.service
 
 [Service]
 Type=oneshot
-ExecStart=$HOMEPATH/net/drv/netdriver_init
-#
+ExecStart=$HOMEPATH/$ONSTART/netdrv/netdriver_init
+
 [Install]
 WantedBy=multi-user.target
 EOF
 
+#
 chmod 644 $fname 
 }
 
@@ -296,17 +310,18 @@ function service_startapp() {
     fname='/etc/systemd/system/StartApp.service'
     cat <<EOF > $fname
 [Unit]
-Description=StartApp
+Description=Exec scripts in $HOMEPATH/$ONSTART/forking
 After=MountNetInterfaces.service
 
 [Service]
 Type=forking
-ExecStart=$HOMEPATH/inmark/app_init
+ExecStart=$ETCPATH/$EXECFILESINFOLDER $ONSTART/forking 
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
+#ExecStart=$HOMEPATH/$ONSTART/start_app
 chmod 644 $fname
 }
 
@@ -389,7 +404,7 @@ EOF
 }
 
 
-function find_flash() {
+function make_find_flash_script() {
     fname=$ETCPATH/$FINDHOME
     cat <<EOF > $fname
 #!/bin/bash
@@ -429,5 +444,81 @@ EOF
 
 chmod +x $fname
 
+}
+
+function journald_conf() {
+    mkdir -p /etc/systemd/journald.conf.d
+    
+    cat <<EOF > /etc/systemd/journald.conf.d/journald.conf
+[Journal]
+SplitMode=false
+SystemMaxUse=50M
+SystemMaxFileSize=50M
+ForwardToSyslog=no
+EOF
+}
+
+function disable_network() {
+    ### systemd-networkd.service is desable !!!
+    systemctl disable systemd-networkd.socket
+    systemctl disable systemd-networkd.service
+    ### This daemon is similar to NetworkManager, but the limited nature of systemd-networkd
+    systemctl disable networkd-dispatcher.service
+    systemctl disable systemd-networkd-wait-online.service
+    ### DNS !!! & ### tokmakov.msk.ru/blog/item/522
+    # systemctl disable systemd-resolved.service
+    # apt install -y resolvconf
+    # systemctl enable resolvconf
+
+    ### mounting a partition without a file system <system boot delay>
+    #systemctl disable var-crash.mount
+    #systemctl disable var-log.mount
+    ### программная среда для обеспечения геопространственной осведомленности в приложениях
+    # systemctl disable geoclue.service
+}
+
+function disable_updates() {
+    ### демон для управления установкой обновлений прошивки в системах на базе Linux
+    systemctl disable fwupd-offline-update.service
+    systemctl disable fwupd.service
+    systemctl disable fwupd-refresh.service
+
+    ### инструмент автоматической установки обновлений
+    systemctl disable unattended-upgrades.service
+    systemctl disable secureboot-db.service
+}
+
+function disable_oopsie() {
+    ### собирает информацию о сбое ядра, отправляет извлеченную подпись в kerneloops.org & canonical
+    systemctl disable kerneloops.service
+    systemctl disable whoopsie.service
+}
+
+function disable_automount(){
+    ### dbus and automount ???
+    systemctl mask udisks2
+    systemctl disable udisks2.service
+}
+
+
+function enable_on_screen_kbd(){
+    apt-get install -y \
+    onboard \
+    xserver-xorg-input-libinput \
+    x11-xserver-utils \
+    x11-utils
+    # onboard : экранная клавиатура.
+    # xserver-xorg-input-libinput : драйвер для сенсорных экранов и других вводных устройств.
+    # x11-xserver-utils  (необязательно, но полезно для диагностики).
+
+    # xserver-xorg-input-synaptics # дополнительные драйверы
+    # xinput-calibrator  # Для калибровки сенсорных экранов
+
+    # Autostart for osk
+    echo "[Desktop Entry]
+Name=Onboard
+Exec=onboard
+Type=Application
+" | sudo tee /etc/xdg/autostart/onboard.desktop
 }
 
