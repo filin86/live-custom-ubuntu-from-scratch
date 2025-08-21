@@ -33,6 +33,7 @@ export TARGET_PACKAGE_REMOVE="
     casper \
     discover \
     laptop-detect \
+    ffmpeg \
     os-prober \
 "
 
@@ -66,7 +67,7 @@ function custom_conf() {
     net_config
     ssh_conf
 
-    #enable_on_screen_kbd
+    enable_on_screen_kbd
     enable_vnc
 
     #apt-get install -y sshpass
@@ -74,12 +75,12 @@ function custom_conf() {
     disable_updates
     disable_oopsie
     disable_automount
-    install_ldk
+    #install_ldk
 
     service_mounthome
-    service_mountlextnetdriver
-    service_mountnetinterfaces
-    service_startapp
+    service_onstartbeforelogin
+    service_onstartoneshot
+    service_onstartforking
 
     exec_on_start
     exec_files_in_folder
@@ -87,12 +88,15 @@ function custom_conf() {
     journald_conf
 
     systemctl daemon-reload
-    systemctl enable MountHome.service MountExtNetDriver.service MountNetInterfaces.service StartApp.service hasplmd.service aksusbd.service
+    systemctl enable MountHome.service OnStartBeforeLogin.service OnStartOneShot.service OnStartForking.service 
+    #hasplmd.service aksusbd.service
 
     echo write the passwd: 123456
     passwd root
 
     disable_sudo
+
+    remove_dangerous
 
 }
 
@@ -103,22 +107,29 @@ function disable_sudo() {
     sed -i '77s/^/#/' /usr/share/initramfs-tools/scripts/casper-bottom/25adduser
 }
 
-function install_ldk() {
-# Variables
-SFTP_HOST="172.16.88.24"
-SFTP_USER="orpo_sftp"
-SFTP_PASS="InAuto2024"
-SFTP_PORT="22"
-REMOTE_FILE="/uploads/images/ubuntu_livecd_files_for_build/aksusbd_10.12-1_amd64.deb"
-LOCAL_DIR="$ETCPATH"
-
-echo "downloading file"
-# Use sshpass with scp to download the file
-sshpass -p "$SFTP_PASS" scp -o "StrictHostKeyChecking accept-new" -P $SFTP_PORT "$SFTP_USER@$SFTP_HOST:$REMOTE_FILE" "$LOCAL_DIR"
-echo "installing file"
-dpkg -i "$LOCAL_DIR/aksusbd_10.12-1_amd64.deb"
-
+function remove_dangerous() {
+    apt-get purge -y \
+        hitori\
+        7zip \
+        ffmpeg
 }
+
+# function install_ldk() {
+# # Variables
+# SFTP_HOST="172.16.88.24"
+# SFTP_USER="orpo_sftp"
+# SFTP_PASS="InAuto2024"
+# SFTP_PORT="22"
+# REMOTE_FILE="/uploads/images/ubuntu_livecd_files_for_build/aksusbd_10.12-1_amd64.deb"
+# LOCAL_DIR="$ETCPATH"
+
+# echo "downloading file"
+# # Use sshpass with scp to download the file
+# sshpass -p "$SFTP_PASS" scp -o "StrictHostKeyChecking accept-new" -P $SFTP_PORT "$SFTP_USER@$SFTP_HOST:$REMOTE_FILE" "$LOCAL_DIR"
+# echo "installing file"
+# dpkg -i "$LOCAL_DIR/aksusbd_10.12-1_amd64.deb"
+
+# }
 
 function exec_files_in_folder() {
     echo "#!/bin/bash
@@ -148,8 +159,7 @@ Type=Application
 function customize_image() {
     # install graphics and desktop
     apt-get install -y \
-        xubuntu-desktop
-        #-minimal
+        xubuntu-desktop-minimal
         #xubuntu-wallpapers
         #plymouth-themes 
 
@@ -164,14 +174,15 @@ function customize_image() {
         mc \
         ssh \
         ethtool \
-        net-tools \
         python3 \
         kbd \
         mtools \
         sshpass \
         iputils-ping \
-        scite \
+        ncat \
         libxcb-cursor0
+        #net-tools \
+        #scite \
         #vim \
 
     # purge
@@ -183,7 +194,11 @@ function customize_image() {
         gnome-mines \
         gnome-sudoku \
         aisleriot \
-        hitori
+        hitori\
+        7zip \
+        ffmpeg
+#        webkit2gtk \
+
 }
 
 function net_config() {
@@ -265,16 +280,36 @@ EOF
 chmod 644 $fname 
 }
 
-function service_mountnetinterfaces() {
-    fname='/etc/systemd/system/MountNetInterfaces.service'
+function service_onstartbeforelogin() {
+    fname='/etc/systemd/system/OnStartBeforeLogin.service'
     cat <<EOF > $fname
 [Unit]
-Description=Exec scripts in $HOMEPATH/$ONSTART/oneshot
-After=MountHome.service network.target network-online.target MountExtNetDriver.service
+Description=Exec scripts in $HOMEPATH/$ONSTART/before_login
+After=MountHome.service
+Before=networking.service
 
 [Service]
 Type=oneshot
-ExecStart="$ETCPATH"/"$EXECFILESINFOLDER" "$ONSTART"/oneshot 
+ExecStart=$ETCPATH/$EXECFILESINFOLDER $ONSTART/before_login
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+#
+chmod 644 $fname 
+}
+
+function service_onstartoneshot() {
+    fname='/etc/systemd/system/OnStartOneShot.service'
+    cat <<EOF > $fname
+[Unit]
+Description=Exec scripts in $HOMEPATH/$ONSTART/oneshot
+After=MountHome.service network.target network-online.target OnStartBeforeLogin.service
+
+[Service]
+Type=oneshot
+ExecStart=$ETCPATH/$EXECFILESINFOLDER $ONSTART/oneshot 
 
 [Install]
 WantedBy=multi-user.target
@@ -285,33 +320,12 @@ chmod 644 $fname
 #ExecStart=$HOMEPATH/$ONSTART/configure_network
 }
 
-function service_mountlextnetdriver() {
-    fname='/etc/systemd/system/MountExtNetDriver.service'
-    cat <<EOF > $fname
-[Unit]
-Description=Apply network drivers
-After=MountHome.service
-Before=networking.service
-
-[Service]
-Type=oneshot
-ExecStart=$HOMEPATH/$ONSTART/netdrv/netdriver_init
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-#
-chmod 644 $fname 
-}
-
-
-function service_startapp() {
-    fname='/etc/systemd/system/StartApp.service'
+function service_onstartforking() {
+    fname='/etc/systemd/system/OnStartForking.service'
     cat <<EOF > $fname
 [Unit]
 Description=Exec scripts in $HOMEPATH/$ONSTART/forking
-After=MountNetInterfaces.service
+After=OnStartOneShot.service
 
 [Service]
 Type=forking
@@ -351,10 +365,10 @@ LoginGraceTime 2m
 PermitRootLogin yes
 StrictModes yes
 
-PubkeyAuthentication no
+PubkeyAuthentication yes
 
 # Expect .ssh/authorized_keys2 to be disregarded by default in future.
-#AuthorizedKeysFile	.ssh/authorized_keys .ssh/authorized_keys2
+AuthorizedKeysFile	.ssh/authorized_keys .ssh/authorized_keys2
 
 #AuthorizedPrincipalsFile none
 
@@ -370,7 +384,7 @@ PubkeyAuthentication no
 #IgnoreRhosts yes
 
 # To disable tunneled clear text passwords, change to no here!
-#PasswordAuthentication yes
+PasswordAuthentication no
 #PermitEmptyPasswords no
 
 # Change to yes to enable challenge-response passwords (beware issues with
@@ -503,10 +517,11 @@ function disable_automount(){
 
 function enable_on_screen_kbd(){
     apt-get install -y \
-    onboard \
-    xserver-xorg-input-libinput \
-    x11-xserver-utils \
-    x11-utils
+    onboard 
+    # \
+    # xserver-xorg-input-libinput \
+    # x11-xserver-utils \
+    # x11-utils
     # onboard : экранная клавиатура.
     # xserver-xorg-input-libinput : драйвер для сенсорных экранов и других вводных устройств.
     # x11-xserver-utils  (необязательно, но полезно для диагностики).
@@ -515,10 +530,10 @@ function enable_on_screen_kbd(){
     # xinput-calibrator  # Для калибровки сенсорных экранов
 
     # Autostart for osk
-    echo "[Desktop Entry]
-Name=Onboard
-Exec=onboard
-Type=Application
-" | sudo tee /etc/xdg/autostart/onboard.desktop
+#     echo "[Desktop Entry]
+# Name=Onboard
+# Exec=onboard
+# Type=Application
+# " | sudo tee /etc/xdg/autostart/onboard.desktop
 }
 

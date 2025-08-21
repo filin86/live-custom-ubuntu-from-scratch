@@ -182,7 +182,7 @@ search --set=root --file /ubuntu
 insmod all_video
 
 set default="0"
-set timeout=3
+set timeout=1
 
 menuentry "Inautomatic Ubuntu" {
     linux /casper/vmlinuz boot=casper systemd.mask=udisks2 nopersistent toram noprompt ---
