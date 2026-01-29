@@ -35,6 +35,8 @@ export TARGET_PACKAGE_REMOVE="
     laptop-detect \
     ffmpeg \
     os-prober \
+    7zip \
+    ffmpeg
 "
 
 # Used to version the configuration.  If breaking changes occur, manual
@@ -91,27 +93,41 @@ function custom_conf() {
     systemctl enable MountHome.service OnStartBeforeLogin.service OnStartOneShot.service OnStartForking.service 
     #hasplmd.service aksusbd.service
 
-    echo write the passwd: 123456
+    echo write the passwd: VeryStrongPassword36CharactersLength
     passwd root
 
-    disable_sudo
+    # disable_sudo
 
     remove_dangerous
 
 }
 
-function disable_sudo() {
-    #awk '{if ($0 ~ /    echo "${USERNAME}  ALL=(ALL) NOPASSWD: ALL" > /root/etc/sudoers) print "#" $0; else print}' usr/share/initramfs-tools/scripts/casper-bottom/25adduser
-    #awk '{if ($0 ~ /    echo "${USERNAME}  ALL=(ALL) NOPASSWD: ALL"/) print "#" $0; else print}' /usr/share/initramfs-tools/scripts/casper-bottom/25adduser > /usr/share/initramfs-tools/scripts/casper-bottom/25adduser.tmp && mv /usr/share/initramfs-tools/scripts/casper-bottom/25adduser.tmp /usr/share/initramfs-tools/scripts/casper-bottom/25adduser
-    #chmod +x /usr/share/initramfs-tools/scripts/casper-bottom/25adduser 
-    sed -i '77s/^/#/' /usr/share/initramfs-tools/scripts/casper-bottom/25adduser
-}
+# function disable_sudo() {
+#     #awk '{if ($0 ~ /    echo "${USERNAME}  ALL=(ALL) NOPASSWD: ALL" > /root/etc/sudoers) print "#" $0; else print}' usr/share/initramfs-tools/scripts/casper-bottom/25adduser
+#     #awk '{if ($0 ~ /    echo "${USERNAME}  ALL=(ALL) NOPASSWD: ALL"/) print "#" $0; else print}' /usr/share/initramfs-tools/scripts/casper-bottom/25adduser > /usr/share/initramfs-tools/scripts/casper-bottom/25adduser.tmp && mv /usr/share/initramfs-tools/scripts/casper-bottom/25adduser.tmp /usr/share/initramfs-tools/scripts/casper-bottom/25adduser
+#     #chmod +x /usr/share/initramfs-tools/scripts/casper-bottom/25adduser 
+#     sed -i '77s/^/#/' /usr/share/initramfs-tools/scripts/casper-bottom/25adduser
+# }
 
 function remove_dangerous() {
     apt-get purge -y \
         hitori\
         7zip \
+        ffmpeg \
+        gnome
+
+        apt-get purge -y \
+        "libreoffice*" \
+        transmission-gtk \
+        transmission-common \
+        gnome-mahjongg \
+        gnome-mines \
+        gnome-sudoku \
+        aisleriot \
+        hitori\
+        7zip \
         ffmpeg
+#        webkit2gtk \
 }
 
 # function install_ldk() {
@@ -180,24 +196,14 @@ function customize_image() {
         sshpass \
         iputils-ping \
         ncat \
+		ifenslave \
         libxcb-cursor0
         #net-tools \
         #scite \
         #vim \
 
     # purge
-    apt-get purge -y \
-        "libreoffice*" \
-        transmission-gtk \
-        transmission-common \
-        gnome-mahjongg \
-        gnome-mines \
-        gnome-sudoku \
-        aisleriot \
-        hitori\
-        7zip \
-        ffmpeg
-#        webkit2gtk \
+
 
 }
 

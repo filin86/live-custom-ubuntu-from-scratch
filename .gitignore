@@ -1,3 +1,5 @@
+chroot
+chroot_install_pkg
 scripts/chroot
 scripts/image
 scripts/certificates
