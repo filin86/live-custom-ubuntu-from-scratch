@@ -100,15 +100,8 @@ function install_pkg() {
     # install live packages
     apt-get install -y \
         sudo \
-        ubuntu-standard \
         casper \
-        discover \
-        laptop-detect \
-        os-prober \
         network-manager \
-        net-tools \
-        wireless-tools \
-        wpagui \
         locales \
         grub-common \
         grub-gfxpayload-lists \
@@ -118,6 +111,7 @@ function install_pkg() {
         grub-efi-amd64-signed \
         shim-signed \
         mtools \
+        openssh-server \
         unzip \
         binutils
     
@@ -317,4 +311,3 @@ for ((ii=$start_index; ii<$end_index; ii++)); do
 done
 
 echo "$0 - Step is complete!"
-
