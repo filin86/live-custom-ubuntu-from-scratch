@@ -111,8 +111,9 @@ function install_pkg() {
         grub-efi-amd64-signed \
         shim-signed \
         mtools \
-        binutils \
-        openssh-server
+        openssh-server \
+        unzip \
+        binutils
     
     case $TARGET_UBUNTU_VERSION in
         "focal" | "bionic")
