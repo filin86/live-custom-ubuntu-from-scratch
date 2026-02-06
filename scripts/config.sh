@@ -61,6 +61,7 @@ function custom_conf() {
     exec_files_in_folder
 
     net_config
+	ensure_network_manager_renderer
     ssh_conf
 	configure_autologin
     enable_on_screen_kbd
@@ -163,7 +164,17 @@ function customize_image() {
 }
 
 function net_config() {
-    apt-get install -y netplan.io util-linux network-manager iproute2 systemd systemd-resolved udev
+	apt-get install -y netplan.io util-linux network-manager
+    systemctl enable NetworkManager.service
+}
+
+function ensure_network_manager_renderer() {
+    mkdir -p /etc/netplan
+    cat <<EOF_NETPLAN > /etc/netplan/01-network-manager-all.yaml
+network:
+  version: 2
+  renderer: NetworkManager
+EOF_NETPLAN
 }
 
 function configure_autologin() {
