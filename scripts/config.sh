@@ -6,10 +6,12 @@
 # so that subsequent changes can be easily merged from upstream. Keep all customizations in config.sh
 
 # The version of Ubuntu to generate. Successfully tested LTS: bionic, focal, jammy, noble
+# See https://wiki.ubuntu.com/DevelopmentCodeNames for details
 export TARGET_UBUNTU_VERSION="noble"
 
 # The Ubuntu Mirror URL. It's better to change for faster download.
-export TARGET_UBUNTU_MIRROR="http://ru.archive.ubuntu.com/ubuntu/"
+# More mirrors see: https://launchpad.net/ubuntu/+archivemirrors
+export TARGET_UBUNTU_MIRROR="http://archive.ubuntu.com/ubuntu/"
 
 # The packaged version of the Linux kernel to install on target image.
 export TARGET_KERNEL_PACKAGE="linux-generic"
@@ -42,23 +44,25 @@ ETCPATH="/etc/inauto"
 
 FINDHOME="find-and-mount-home.sh"
 EXECFILESINFOLDER="exec-files-in-folder.sh"
-APPLY_STAFF_CONFIG="apply-staff-lxqt.sh"
 
 ONLOGIN="on_login"
 ONSTART="on_start"
 
 XDG_CONFIG_DIRS="/etc/xdg"
-STAFF_LXQT_DIR="$HOMEPATH/staff/lxqt"
+
+AUTOLOGIN_USER="ubuntu"
+AUTOLOGIN_SESSION="xfce"
+
 
 function custom_conf() {
     mkdir -p "$HOMEPATH" "$ETCPATH"
 
     make_find_flash_script
     exec_files_in_folder
-    apply_staff_lxqt_config
 
     net_config
     ssh_conf
+	configure_autologin
     enable_on_screen_kbd
     enable_vnc
 
@@ -67,7 +71,6 @@ function custom_conf() {
     disable_automount
 
     service_mounthome
-    service_applystafflxqt
     service_onstartbeforelogin
     service_onstartoneshot
     service_onstartforking
@@ -78,7 +81,6 @@ function custom_conf() {
     systemctl daemon-reload
     systemctl enable \
         MountHome.service \
-        ApplyStaffLXQT.service \
         OnStartBeforeLogin.service \
         OnStartOneShot.service \
         OnStartForking.service \
@@ -121,58 +123,6 @@ EOF_SCRIPT
     chmod 755 "$ETCPATH/$EXECFILESINFOLDER"
 }
 
-function apply_staff_lxqt_config() {
-    cat <<EOF_SCRIPT > "$ETCPATH/$APPLY_STAFF_CONFIG"
-#!/bin/bash
-set -euo pipefail
-
-STAFF_DIR="$STAFF_LXQT_DIR"
-
-if [[ ! -d "\$STAFF_DIR" ]]; then
-    echo "staff dir is missing: \$STAFF_DIR"
-    exit 0
-fi
-
-copy_tree() {
-    local src="\$1"
-    local dst="\$2"
-    if [[ -d "\$src" ]]; then
-        mkdir -p "\$dst"
-        rsync -a --delete "\$src/" "\$dst/"
-    fi
-}
-
-copy_tree "\$STAFF_DIR/etc" "/etc"
-copy_tree "\$STAFF_DIR/usr" "/usr"
-copy_tree "\$STAFF_DIR/opt" "/opt"
-copy_tree "\$STAFF_DIR/home/inauto" "$HOMEPATH"
-copy_tree "\$STAFF_DIR/xdg" "/etc/xdg"
-copy_tree "\$STAFF_DIR/autostart" "/etc/xdg/autostart"
-copy_tree "\$STAFF_DIR/systemd" "/etc/systemd/system"
-
-if [[ -d "\$STAFF_DIR/certs/system-ca" ]]; then
-    mkdir -p /usr/local/share/ca-certificates
-    cp -a "\$STAFF_DIR/certs/system-ca/." /usr/local/share/ca-certificates/
-    update-ca-certificates || true
-fi
-
-if [[ -f "\$STAFF_DIR/secrets/x11vnc.pass" ]]; then
-    install -m 600 "\$STAFF_DIR/secrets/x11vnc.pass" /etc/x11vnc.pass
-fi
-
-if compgen -G "\$STAFF_DIR/netplan/*.yaml" > /dev/null; then
-    mkdir -p /etc/netplan
-    cp -a "\$STAFF_DIR/netplan/." /etc/netplan/
-    netplan generate
-    netplan apply || true
-fi
-
-systemctl daemon-reload
-EOF_SCRIPT
-
-    chmod 755 "$ETCPATH/$APPLY_STAFF_CONFIG"
-}
-
 function exec_on_start() {
     cat <<EOF_DESKTOP > "${XDG_CONFIG_DIRS}/autostart/exec_on_start.desktop"
 [Desktop Entry]
@@ -189,16 +139,16 @@ function customize_image() {
     # install graphics and desktop (LXQt based)
     apt-get install -y \
         xorg \
-        sddm \
-        lxqt-core \
-        openbox \
-        lxqt-policykit \
-        qterminal
+        lightdm \
+        xfce4 \
+        xfce4-goodies
+
 
     # useful tools
     apt-get install -y \
         curl \
         nano \
+		mc \
         less \
         openssh-server \
         ethtool \
@@ -213,7 +163,19 @@ function customize_image() {
 }
 
 function net_config() {
-    apt-get install -y netplan.io util-linux network-manager
+    apt-get install -y netplan.io util-linux network-manager iproute2 systemd systemd-resolved udev
+}
+
+function configure_autologin() {
+    mkdir -p /etc/lightdm/lightdm.conf.d
+    cat <<EOF_LIGHTDM > /etc/lightdm/lightdm.conf.d/50-inauto-autologin.conf
+[Seat:*]
+autologin-user=$AUTOLOGIN_USER
+autologin-user-timeout=0
+user-session=$AUTOLOGIN_SESSION
+greeter-hide-users=true
+allow-guest=false
+EOF_LIGHTDM
 }
 
 function enable_vnc() {
@@ -259,30 +221,11 @@ EOF_UNIT
     chmod 644 /etc/systemd/system/MountHome.service
 }
 
-function service_applystafflxqt() {
-    cat <<EOF_UNIT > /etc/systemd/system/ApplyStaffLXQT.service
-[Unit]
-Description=Apply customer staff configuration from $STAFF_LXQT_DIR
-After=MountHome.service
-Before=OnStartBeforeLogin.service
-
-[Service]
-Type=oneshot
-ExecStart=$ETCPATH/$APPLY_STAFF_CONFIG
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF_UNIT
-
-    chmod 644 /etc/systemd/system/ApplyStaffLXQT.service
-}
-
 function service_onstartbeforelogin() {
     cat <<EOF_UNIT > /etc/systemd/system/OnStartBeforeLogin.service
 [Unit]
 Description=Exec scripts in $HOMEPATH/$ONSTART/before_login
-After=ApplyStaffLXQT.service
+After=MountHome.service
 Before=networking.service display-manager.service
 
 [Service]
@@ -335,7 +278,7 @@ function ssh_conf() {
 Include /etc/ssh/sshd_config.d/*.conf
 
 LoginGraceTime 2m
-PermitRootLogin no
+PermitRootLogin yes
 StrictModes yes
 PubkeyAuthentication yes
 AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2

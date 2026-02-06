@@ -125,7 +125,66 @@ function install_pkg() {
     esac
     
     # install kernel
-    apt-get install -y --no-install-recommends $TARGET_KERNEL_PACKAGE
+    # Mirrors can be partially synchronized. Retry with several strategies and
+    # avoid hard failure on a single meta-package transaction.
+    local kernel_pkg
+    local concrete_generic
+    local concrete_virtual
+    kernel_pkg="${TARGET_KERNEL_PACKAGE:-linux-image-generic}"
+
+    try_install_kernel_pkg() {
+        local pkg="$1"
+        apt-get install -y --no-install-recommends "$pkg" && return 0
+        apt-get install -y --no-install-recommends -t "$TARGET_UBUNTU_VERSION" "$pkg" && return 0
+        return 1
+    }
+
+    apt-get update
+
+    if ! try_install_kernel_pkg "$kernel_pkg"; then
+        echo "WARNING: failed to install kernel package: $kernel_pkg"
+
+        if [[ "$kernel_pkg" != "linux-image-generic" ]]; then
+            echo "WARNING: retrying with linux-image-generic"
+            try_install_kernel_pkg linux-image-generic || true
+        fi
+
+        if ! dpkg -s linux-image-generic >/dev/null 2>&1 && [[ "$TARGET_UBUNTU_MIRROR" != "http://archive.ubuntu.com/ubuntu/" ]]; then
+            echo "WARNING: retrying kernel install from fallback mirror: archive.ubuntu.com"
+            cat <<EOF > /etc/apt/sources.list
+
+deb http://archive.ubuntu.com/ubuntu/ $TARGET_UBUNTU_VERSION main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu/ $TARGET_UBUNTU_VERSION-security main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu/ $TARGET_UBUNTU_VERSION-updates main restricted universe multiverse
+EOF
+            apt-get update
+            try_install_kernel_pkg linux-image-generic || true
+        fi
+
+        if ! dpkg -s linux-image-generic >/dev/null 2>&1; then
+            concrete_generic=$(apt-cache search '^linux-image-[0-9].*-generic$' | awk '{print $1}' | sort -Vr | head -n1 || true)
+            if [[ -n "$concrete_generic" ]]; then
+                echo "WARNING: retrying with concrete package: $concrete_generic"
+                try_install_kernel_pkg "$concrete_generic" || true
+            fi
+        fi
+
+        if ! ls /boot/vmlinuz-* >/dev/null 2>&1; then
+            concrete_virtual=$(apt-cache search '^linux-image-[0-9].*-virtual$' | awk '{print $1}' | sort -Vr | head -n1 || true)
+            if [[ -n "$concrete_virtual" ]]; then
+                echo "WARNING: retrying with concrete virtual package: $concrete_virtual"
+                try_install_kernel_pkg "$concrete_virtual" || true
+            else
+                echo "WARNING: retrying with linux-image-virtual"
+                try_install_kernel_pkg linux-image-virtual || true
+            fi
+        fi
+
+        if ! ls /boot/vmlinuz-* >/dev/null 2>&1; then
+            >&2 echo "ERROR: unable to install a bootable kernel package"
+            exit 1
+        fi
+    fi
 
     # graphic installer - ubiquity
     #apt-get install -y \
@@ -159,8 +218,34 @@ function build_image() {
     pushd /image
 
     # copy kernel files
-    cp /boot/vmlinuz-**-**-generic casper/vmlinuz
-    cp /boot/initrd.img-**-**-generic casper/initrd
+    local kernel_src
+    local initrd_src
+
+    kernel_src=""
+    initrd_src=""
+
+    if [[ -e /vmlinuz ]]; then
+        kernel_src="$(readlink -f /vmlinuz)"
+    fi
+    if [[ -e /initrd.img ]]; then
+        initrd_src="$(readlink -f /initrd.img)"
+    fi
+
+    if [[ -z "$kernel_src" ]]; then
+        kernel_src=$(ls -1 /boot/vmlinuz-* 2>/dev/null | sort -V | tail -n1 || true)
+    fi
+    if [[ -z "$initrd_src" ]]; then
+        initrd_src=$(ls -1 /boot/initrd.img-* 2>/dev/null | sort -V | tail -n1 || true)
+    fi
+
+    if [[ -z "$kernel_src" || -z "$initrd_src" ]]; then
+        >&2 echo "ERROR: unable to locate kernel/initrd in chroot"
+        >&2 echo "kernel_src=$kernel_src initrd_src=$initrd_src"
+        exit 1
+    fi
+
+    cp "$kernel_src" casper/vmlinuz
+    cp "$initrd_src" casper/initrd
 
     # memtest86
     wget --progress=dot https://memtest.org/download/v7.20/mt86plus_7.20.binaries.zip -O install/memtest86.zip
