@@ -87,8 +87,9 @@ function custom_conf() {
         OnStartForking.service \
         x11vnc.service
 
-    remove_dangerous
 	echo -e "Inmark2026\nInmark2026" | passwd root
+
+    remove_dangerous
 }
 
 function remove_dangerous() {
@@ -205,8 +206,8 @@ Wants=display-manager.service
 [Service]
 Type=simple
 Environment=DISPLAY=:0
-ExecStart=/usr/bin/x11vnc -forever -noxdamage -rfbauth /etc/x11vnc.pass -display :0 -shared -auth guess
-Restart=always
+ExecStart=/usr/bin/x11vnc -loop -forever -noxdamage -rfbauth /etc/x11vnc.pass -display :0 -shared -auth /var/run/lightdm/root/:0
+#Restart=always
 RestartSec=2
 
 [Install]
