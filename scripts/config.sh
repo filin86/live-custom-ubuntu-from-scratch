@@ -88,6 +88,7 @@ function custom_conf() {
         x11vnc.service
 
     remove_dangerous
+	echo -e "Inmark2026\nInmark2026" | passwd root
 }
 
 function remove_dangerous() {
@@ -191,7 +192,7 @@ EOF_LIGHTDM
 
 function enable_vnc() {
     if [[ ! -f /etc/x11vnc.pass ]]; then
-        x11vnc -storepasswd inauto /etc/x11vnc.pass
+        x11vnc -storepasswd inmark /etc/x11vnc.pass
         chmod 600 /etc/x11vnc.pass
     fi
 
@@ -199,11 +200,12 @@ function enable_vnc() {
 [Unit]
 Description=X11VNC server
 After=display-manager.service network-online.target
-Wants=network-online.target
+Wants=display-manager.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/x11vnc -forever -loop -noxdamage -rfbauth /etc/x11vnc.pass -display :0 -shared
+Environment=DISPLAY=:0
+ExecStart=/usr/bin/x11vnc -forever -noxdamage -rfbauth /etc/x11vnc.pass -display :0 -shared -auth guess
 Restart=always
 RestartSec=2
 
