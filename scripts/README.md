@@ -5,7 +5,7 @@
 ```console
 This script builds a bootable ubuntu ISO image
 
-Supported commands : setup_host debootstrap prechroot chr_setup_host chr_install_pkg chr_customize_image chr_custom_conf chr_postpkginst chr_build_image chr_finish_up postchroot build_iso
+Supported commands : setup_host debootstrap prechroot chr_setup_host chr_install_pkg chr_customize_image chr_custom_conf chr_postpkginst scan_vulnerabilities chr_build_image chr_finish_up postchroot build_iso
 
 Syntax: ./build.sh [start_cmd] [-] [end_cmd]
   run from start_cmd to end_end
@@ -65,3 +65,35 @@ The configuration script is versioned with the variable CONFIG_FILE_VERSION. Any
 format is changed in `default_config.sh`, this value is bumped. Once this happens `config.sh` must be updated manually
 from the default file to ensure the new/changed variables are as desired. Once the merge is complete the `config.sh` file's
 CONFIG_FILE_VERSION should match the default and the build will run.
+
+## Vulnerability Report Stage
+
+The `scan_vulnerabilities` stage scans the prepared `chroot/` as a root filesystem and writes artifacts to `scripts/reports/<target>-<timestamp>/`.
+
+Requirements:
+- `trivy` must be installed on the build host
+- `jq` is installed by `./build.sh setup_host`
+
+Generated files:
+- `metadata.txt` - scan parameters and Trivy version
+- `os-release` - target OS metadata from the chroot
+- `packages.tsv` - installed package inventory
+- `trivy-rootfs.json` - full machine-readable vulnerability report
+- `trivy-rootfs.txt` - human-readable vulnerability table
+- `vulnerabilities.tsv` - package/version/CVE/fixed-version rows for analysis
+- `affected-packages.txt` - unique package names with findings
+- `summary.txt` - quick severity totals
+
+Examples:
+
+```console
+./build.sh chr_postpkginst - scan_vulnerabilities
+./build.sh scan_vulnerabilities
+```
+
+Optional environment variables:
+- `VULN_SCAN_SEVERITIES` default: `UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL`
+- `VULN_SCAN_TIMEOUT` default: `15m`
+- `VULN_REPORT_DIR` default: `scripts/reports/<target>-<timestamp>`
+
+If a `.trivyignore` file exists in the repository root or `scripts/`, it will be used automatically.

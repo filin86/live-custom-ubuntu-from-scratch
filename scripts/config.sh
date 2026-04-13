@@ -52,6 +52,15 @@ XDG_CONFIG_DIRS="/etc/xdg"
 
 AUTOLOGIN_USER="ubuntu"
 AUTOLOGIN_SESSION="xfce"
+DOCKER_DATA_ROOT="$HOMEPATH/docker"
+
+DEFAULT_LOCALE="ru_RU.UTF-8"
+FALLBACK_LOCALE="en_US.UTF-8"
+DEFAULT_LANGUAGE="ru_RU:ru:en_US:en"
+KEYBOARD_MODEL="pc105"
+KEYBOARD_LAYOUTS="us,ru"
+KEYBOARD_VARIANTS=","
+KEYBOARD_OPTIONS="grp:caps_toggle"
 
 
 function custom_conf() {
@@ -60,6 +69,7 @@ function custom_conf() {
     make_find_flash_script
     exec_files_in_folder
 
+    configure_locale_keyboard
     net_config
 	ensure_network_manager_renderer
     ssh_conf
@@ -75,6 +85,7 @@ function custom_conf() {
     service_onstartbeforelogin
     service_onstartoneshot
     service_onstartforking
+    configure_docker
 
     exec_on_start
     journald_conf
@@ -85,11 +96,90 @@ function custom_conf() {
         OnStartBeforeLogin.service \
         OnStartOneShot.service \
         OnStartForking.service \
+        containerd.service \
+        docker.service \
+        docker.socket \
         x11vnc.service
 
 	echo -e "Inmark2026\nInmark2026" | passwd root
 
+    remove_unused_features
     remove_dangerous
+}
+
+function purge_installed_packages() {
+    local packages_to_purge=()
+    local package_name
+
+    for package_name in "$@"; do
+        if dpkg-query -W -f='${Status}' "$package_name" 2>/dev/null | grep -q '^install ok installed$'; then
+            packages_to_purge+=("$package_name")
+        fi
+    done
+
+    if [[ ${#packages_to_purge[@]} -gt 0 ]]; then
+        apt-get purge -y "${packages_to_purge[@]}"
+    fi
+}
+
+function purge_present_packages() {
+    local packages_to_purge=()
+    local package_name
+    local package_state
+
+    for package_name in "$@"; do
+        package_state=$(dpkg-query -W -f='${db:Status-Status}' "$package_name" 2>/dev/null || true)
+        if [[ "$package_state" == "installed" || "$package_state" == "config-files" ]]; then
+            packages_to_purge+=("$package_name")
+        fi
+    done
+
+    if [[ ${#packages_to_purge[@]} -gt 0 ]]; then
+        apt-get purge -y "${packages_to_purge[@]}"
+    fi
+}
+
+function remove_unused_features() {
+    purge_installed_packages \
+        bluez \
+        bluez-obexd \
+        gnome-bluetooth \
+        gnome-bluetooth-sendto \
+        indicator-bluetooth \
+        avahi-daemon \
+        cups \
+        cups-browsed \
+        cups-client \
+        cups-common \
+        cups-core-drivers \
+        cups-daemon \
+        cups-filters \
+        cups-filters-core-drivers \
+        cups-ipp-utils \
+        cups-pk-helper \
+        cups-ppdc \
+        cups-server-common \
+        indicator-printers \
+        ipp-usb \
+        libnss-mdns \
+        python3-cups \
+        python3-cupshelpers \
+        sane-airscan \
+        system-config-printer \
+        system-config-printer-common \
+        system-config-printer-udev \
+        yelp \
+        yelp-xsl \
+        libyelp0 \
+        gvfs-backends \
+        pulseaudio \
+        pulseaudio-utils \
+        pavucontrol \
+        indicator-sound \
+        libasound2-plugins \
+        libcanberra-pulse \
+        xfce4-pulseaudio-plugin \
+        xfce4-weather-plugin
 }
 
 function remove_dangerous() {
@@ -146,9 +236,22 @@ function customize_image() {
         xfce4 \
         xfce4-goodies
 
+    # Keep the core XFCE shell installed explicitly so autoremove doesn't
+    # delete the panel, menu, or file manager when we purge some goodies.
+    apt-get install -y \
+        xfce4-session \
+        xfce4-settings \
+        xfdesktop4 \
+        xfwm4 \
+        thunar \
+        xfce4-panel \
+        xfce4-appfinder \
+        xfce4-whiskermenu-plugin
+
 
     # useful tools
     apt-get install -y \
+        ca-certificates \
         curl \
         nano \
 		mc \
@@ -156,6 +259,8 @@ function customize_image() {
         openssh-server \
         ethtool \
         kbd \
+        keyboard-configuration \
+        console-setup \
         mtools \
         iputils-ping \
         libxcb-cursor0 \
@@ -163,6 +268,8 @@ function customize_image() {
         ufw \
         x11vnc \
         dbus-x11
+
+    install_docker_engine
 }
 
 function net_config() {
@@ -215,6 +322,170 @@ WantedBy=multi-user.target
 EOF_UNIT
 
     ufw allow 5900/tcp
+}
+
+function preseed_debconf() {
+    cat <<EOF_DEBCONF | debconf-set-selections
+locales locales/default_environment_locale select $DEFAULT_LOCALE
+locales locales/locales_to_be_generated multiselect $DEFAULT_LOCALE UTF-8, $FALLBACK_LOCALE UTF-8
+keyboard-configuration keyboard-configuration/modelcode string $KEYBOARD_MODEL
+keyboard-configuration keyboard-configuration/layoutcode string $KEYBOARD_LAYOUTS
+keyboard-configuration keyboard-configuration/variantcode string $KEYBOARD_VARIANTS
+keyboard-configuration keyboard-configuration/optionscode string $KEYBOARD_OPTIONS
+keyboard-configuration keyboard-configuration/store_defaults_in_debconf_db boolean true
+keyboard-configuration keyboard-configuration/xkb-keymap select $KEYBOARD_LAYOUTS
+EOF_DEBCONF
+}
+
+function configure_locale_keyboard() {
+    preseed_debconf
+
+    cat <<EOF_LOCALE_GEN > /etc/locale.gen
+$DEFAULT_LOCALE UTF-8
+$FALLBACK_LOCALE UTF-8
+EOF_LOCALE_GEN
+
+    locale-gen "$DEFAULT_LOCALE" "$FALLBACK_LOCALE"
+    update-locale LANG="$DEFAULT_LOCALE" LANGUAGE="$DEFAULT_LANGUAGE"
+
+    cat <<EOF_DEFAULT_LOCALE > /etc/default/locale
+LANG=$DEFAULT_LOCALE
+LANGUAGE=$DEFAULT_LANGUAGE
+EOF_DEFAULT_LOCALE
+
+    cat <<EOF_KEYBOARD > /etc/default/keyboard
+XKBMODEL="$KEYBOARD_MODEL"
+XKBLAYOUT="$KEYBOARD_LAYOUTS"
+XKBVARIANT="$KEYBOARD_VARIANTS"
+XKBOPTIONS="$KEYBOARD_OPTIONS"
+BACKSPACE="guess"
+EOF_KEYBOARD
+
+    mkdir -p /etc/X11/Xsession.d
+    cat <<EOF_XKB > /etc/X11/Xsession.d/90inauto-keyboard
+#!/bin/sh
+
+if command -v setxkbmap >/dev/null 2>&1; then
+    setxkbmap -model "$KEYBOARD_MODEL" -layout "$KEYBOARD_LAYOUTS" -variant "$KEYBOARD_VARIANTS" -option "$KEYBOARD_OPTIONS"
+fi
+EOF_XKB
+
+    chmod 755 /etc/X11/Xsession.d/90inauto-keyboard
+
+    dpkg-reconfigure -f noninteractive locales keyboard-configuration console-setup
+    setupcon --save-only || true
+}
+
+function install_docker_engine() {
+    local docker_arch
+    local docker_codename
+
+    purge_present_packages \
+        docker.io \
+        docker-compose \
+        docker-compose-v2 \
+        docker-doc \
+        podman-docker \
+        containerd \
+        runc
+
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+
+    docker_arch=$(dpkg --print-architecture)
+    docker_codename=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+
+    cat <<EOF_DOCKER_APT > /etc/apt/sources.list.d/docker.sources
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $docker_codename
+Components: stable
+Architectures: $docker_arch
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF_DOCKER_APT
+
+    apt-get update
+    apt-get install -y \
+        docker-ce \
+        docker-ce-cli \
+        containerd.io \
+        docker-buildx-plugin \
+        docker-compose-plugin
+
+    install_docker_compose_compat
+}
+
+function install_docker_compose_compat() {
+    install -d /usr/local/bin
+    cat <<'EOF_DOCKER_COMPOSE' > /usr/local/bin/docker-compose
+#!/bin/sh
+exec docker compose "$@"
+EOF_DOCKER_COMPOSE
+
+    chmod 755 /usr/local/bin/docker-compose
+}
+
+function ensure_group_member() {
+    local group_name="$1"
+    local user_name="$2"
+    local group_line
+    local group_gid
+    local members
+    local new_members
+
+    getent group "$group_name" >/dev/null || groupadd "$group_name"
+
+    if id -u "$user_name" >/dev/null 2>&1; then
+        usermod -aG "$group_name" "$user_name"
+        return 0
+    fi
+
+    group_line=$(getent group "$group_name")
+    group_gid=$(echo "$group_line" | cut -d: -f3)
+    members=$(echo "$group_line" | cut -d: -f4)
+
+    if [[ ",$members," == *",$user_name,"* ]]; then
+        return 0
+    fi
+
+    if [[ -n "$members" ]]; then
+        new_members="$members,$user_name"
+    else
+        new_members="$user_name"
+    fi
+
+    awk -F: -v OFS=: -v target_group="$group_name" -v target_gid="$group_gid" -v target_members="$new_members" '
+        $1 == target_group {
+            $2 = "x"
+            $3 = target_gid
+            $4 = target_members
+        }
+        { print }
+    ' /etc/group > /etc/group.tmp
+
+    mv /etc/group.tmp /etc/group
+}
+
+function configure_docker() {
+    mkdir -p /etc/docker
+    cat <<EOF_DOCKER > /etc/docker/daemon.json
+{
+  "data-root": "$DOCKER_DATA_ROOT"
+}
+EOF_DOCKER
+
+    mkdir -p /etc/systemd/system/docker.service.d
+    cat <<EOF_DOCKER_OVERRIDE > /etc/systemd/system/docker.service.d/10-inauto.conf
+[Unit]
+After=MountHome.service
+
+[Service]
+ExecStartPre=/bin/mkdir -p $DOCKER_DATA_ROOT
+EOF_DOCKER_OVERRIDE
+
+    # The live user is created by casper at boot, so keep docker-group membership by name.
+    ensure_group_member docker "$AUTOLOGIN_USER"
 }
 
 function service_mounthome() {

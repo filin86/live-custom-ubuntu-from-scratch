@@ -49,6 +49,8 @@ function check_host() {
 
     export HOME=/root
     export LC_ALL=C
+    export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+    export DEBCONF_NONINTERACTIVE_SEEN=true
 }
 
 function setup_host() {
@@ -95,6 +97,11 @@ function load_config() {
 
 function install_pkg() {
     echo "=====> running install_pkg ... will take a long time ..."
+
+    if declare -F preseed_debconf >/dev/null 2>&1; then
+        preseed_debconf
+    fi
+
     apt-get -y upgrade
 
     # install live packages
@@ -203,7 +210,7 @@ function postpkginst() {
     apt-get autoremove -y
 
     # final touch
-    dpkg-reconfigure locales
+    dpkg-reconfigure -f noninteractive locales keyboard-configuration console-setup
 
     apt-get clean -y
 }

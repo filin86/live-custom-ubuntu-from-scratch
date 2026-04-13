@@ -6,7 +6,7 @@ set -u                  # treat unset variable as error
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 
-CMD=(setup_host debootstrap prechroot chr_setup_host chr_install_pkg chr_customize_image chr_custom_conf chr_postpkginst chr_build_image chr_finish_up postchroot build_iso)
+CMD=(setup_host debootstrap prechroot chr_setup_host chr_install_pkg chr_customize_image chr_custom_conf chr_postpkginst scan_vulnerabilities chr_build_image chr_finish_up postchroot build_iso)
 
 DATE=`TZ="UTC" date +"%y%m%d-%H%M%S"`
 
@@ -98,13 +98,236 @@ function check_config() {
 function setup_host() {
     echo "=====> running setup_host ..."
     sudo apt update
-    sudo apt install -y debootstrap squashfs-tools xorriso
+    sudo apt install -y debootstrap squashfs-tools xorriso binutils zstd jq
     sudo mkdir -p chroot
 }
 
 function debootstrap() {
     echo "=====> running debootstrap ... will take a couple of minutes ..."
-    sudo debootstrap --arch=amd64 --variant=minbase $TARGET_UBUNTU_VERSION chroot $TARGET_UBUNTU_MIRROR
+    local extractor_args
+    extractor_args=()
+
+    if [[ -d chroot ]] && find chroot -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+        >&2 echo "ERROR: target directory 'chroot' is not empty."
+        >&2 echo "Remove it before restarting debootstrap, or resume the build from a later step."
+        exit 1
+    fi
+
+    if ! command -v zstd >/dev/null 2>&1; then
+        >&2 echo "ERROR: zstd is required by debootstrap to unpack modern Ubuntu .deb packages."
+        >&2 echo "Run './scripts/build.sh setup_host' or install the 'zstd' package on the host."
+        exit 1
+    fi
+
+    if dpkg-deb --version 2>&1 | grep -qi "busybox"; then
+        echo "WARNING: BusyBox dpkg-deb detected on host, forcing debootstrap extractor=ar"
+        extractor_args=(--extractor=ar)
+    fi
+
+    sudo debootstrap \
+        --verbose \
+        "${extractor_args[@]}" \
+        --arch=amd64 \
+        --variant=minbase \
+        $TARGET_UBUNTU_VERSION \
+        chroot \
+        $TARGET_UBUNTU_MIRROR
+}
+
+function scan_vulnerabilities() {
+    echo "=====> running scan_vulnerabilities ..."
+
+    local report_root
+    local metadata_report
+    local package_inventory
+    local affected_packages
+    local trivy_json_report
+    local trivy_table_report
+    local vulnerability_tsv
+    local summary_report
+    local os_release_report
+    local repo_root
+    local trivy_ignorefile
+    local trivy_bin
+    local trivy_help
+    local trivy_version
+    local trivy_type_args
+    local trivy_common_args
+    local severity_filter
+    local scan_timeout
+    local ignore_args
+    local package_count
+    local result_count
+
+    repo_root="$(dirname "$SCRIPT_DIR")"
+    severity_filter="${VULN_SCAN_SEVERITIES:-UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL}"
+    scan_timeout="${VULN_SCAN_TIMEOUT:-15m}"
+    report_root="${VULN_REPORT_DIR:-$SCRIPT_DIR/reports/${TARGET_NAME}-${DATE}}"
+
+    metadata_report="$report_root/metadata.txt"
+    package_inventory="$report_root/packages.tsv"
+    affected_packages="$report_root/affected-packages.txt"
+    trivy_json_report="$report_root/trivy-rootfs.json"
+    trivy_table_report="$report_root/trivy-rootfs.txt"
+    vulnerability_tsv="$report_root/vulnerabilities.tsv"
+    summary_report="$report_root/summary.txt"
+    os_release_report="$report_root/os-release"
+    trivy_bin="${TRIVY_BIN:-trivy}"
+    ignore_args=()
+    trivy_type_args=()
+    trivy_common_args=()
+    trivy_ignorefile=""
+    trivy_help=""
+    trivy_version=""
+    package_count=0
+    result_count=0
+
+    if [[ ! -d chroot ]]; then
+        >&2 echo "ERROR: chroot directory does not exist. Run debootstrap and package customization first."
+        exit 1
+    fi
+
+    if [[ ! -f chroot/var/lib/dpkg/status ]]; then
+        >&2 echo "ERROR: chroot does not look like a prepared Ubuntu rootfs (missing var/lib/dpkg/status)."
+        exit 1
+    fi
+
+    if ! command -v "$trivy_bin" >/dev/null 2>&1; then
+        >&2 echo "ERROR: Trivy is required for the vulnerability report stage."
+        >&2 echo "Install Trivy on the build host or set TRIVY_BIN to the scanner path, then rerun './scripts/build.sh scan_vulnerabilities'."
+        exit 1
+    fi
+
+    if ! command -v jq >/dev/null 2>&1; then
+        >&2 echo "ERROR: jq is required to post-process the Trivy report."
+        >&2 echo "Run './scripts/build.sh setup_host' or install the 'jq' package on the host."
+        exit 1
+    fi
+
+    if ! trivy_help="$("$trivy_bin" rootfs --help 2>&1)"; then
+        >&2 echo "ERROR: unable to execute '$trivy_bin rootfs --help'."
+        >&2 printf '%s\n' "$trivy_help"
+        exit 1
+    fi
+
+    if grep -q -- '--pkg-types' <<< "$trivy_help"; then
+        trivy_type_args=(--pkg-types os)
+    elif grep -q -- '--vuln-type' <<< "$trivy_help"; then
+        trivy_type_args=(--vuln-type os)
+    fi
+
+    trivy_version="$("$trivy_bin" --version 2>&1 | head -n 1 || true)"
+
+    if [[ -f "$repo_root/.trivyignore" ]]; then
+        trivy_ignorefile="$repo_root/.trivyignore"
+    elif [[ -f "$SCRIPT_DIR/.trivyignore" ]]; then
+        trivy_ignorefile="$SCRIPT_DIR/.trivyignore"
+    fi
+
+    if [[ -n "$trivy_ignorefile" ]]; then
+        ignore_args=(--ignorefile "$trivy_ignorefile")
+    fi
+
+    mkdir -p "$report_root"
+
+    {
+        echo "target_name=$TARGET_NAME"
+        echo "target_ubuntu_version=$TARGET_UBUNTU_VERSION"
+        echo "target_ubuntu_mirror=$TARGET_UBUNTU_MIRROR"
+        echo "generated_at_utc=$(TZ=UTC date -Iseconds)"
+        echo "scan_timeout=$scan_timeout"
+        echo "severity_filter=$severity_filter"
+        echo "trivy_bin=$trivy_bin"
+        echo "trivy_version=$trivy_version"
+        if [[ -n "$trivy_ignorefile" ]]; then
+            echo "trivy_ignorefile=$trivy_ignorefile"
+        else
+            echo "trivy_ignorefile=<none>"
+        fi
+    } > "$metadata_report"
+
+    sudo cat chroot/etc/os-release > "$os_release_report"
+    {
+        printf 'package\tversion\tarchitecture\n'
+        sudo chroot chroot dpkg-query -W --showformat='${Package}\t${Version}\t${Architecture}\n' | sort
+    } > "$package_inventory"
+
+    package_count=$(tail -n +2 "$package_inventory" | wc -l | tr -d ' ')
+
+    trivy_common_args=(
+        rootfs
+        --scanners vuln
+        "${trivy_type_args[@]}"
+        --severity "$severity_filter"
+        --timeout "$scan_timeout"
+        "${ignore_args[@]}"
+    )
+
+    "$trivy_bin" "${trivy_common_args[@]}" \
+        --list-all-pkgs \
+        --format json \
+        --output "$trivy_json_report" \
+        chroot
+
+    "$trivy_bin" "${trivy_common_args[@]}" \
+        --format table \
+        --output "$trivy_table_report" \
+        chroot
+
+    result_count=$(jq '(.Results // []) | length' "$trivy_json_report")
+
+    if [[ "$result_count" -eq 0 && "$package_count" -gt 0 ]]; then
+        >&2 echo "WARNING: Trivy returned zero scan results for a rootfs with $package_count installed packages."
+        >&2 echo "WARNING: Treat this as an inconclusive scan, not as proof that the image has no CVEs."
+        >&2 echo "WARNING: Check Trivy version/DB and compare with a newer official Trivy build if possible."
+    fi
+
+    {
+        printf 'package\tinstalled_version\tseverity\tvulnerability_id\tfixed_version\tprimary_url\n'
+        jq -r '
+            [
+                .Results[]?.Vulnerabilities[]?
+                | [
+                    .PkgName,
+                    .InstalledVersion,
+                    .Severity,
+                    .VulnerabilityID,
+                    (.FixedVersion // ""),
+                    (.PrimaryURL // "")
+                ]
+            ]
+            | sort_by(.[0], .[2], .[3])
+            | .[]
+            | @tsv
+        ' "$trivy_json_report"
+    } > "$vulnerability_tsv"
+
+    jq -r '
+        [
+            .Results[]?.Vulnerabilities[]?.PkgName
+        ]
+        | map(select(. != null))
+        | unique
+        | .[]
+    ' "$trivy_json_report" > "$affected_packages"
+
+    jq -r '
+        def severity_count(level):
+            ([.Results[]?.Vulnerabilities[]? | select(.Severity == level)] | length);
+        [
+            "Report directory: '"$report_root"'",
+            "Total vulnerabilities: " + (([.Results[]?.Vulnerabilities[]?] | length) | tostring),
+            "Affected packages: " + (([.Results[]?.Vulnerabilities[]?.PkgName] | map(select(. != null)) | unique | length) | tostring),
+            "CRITICAL: " + (severity_count("CRITICAL") | tostring),
+            "HIGH: " + (severity_count("HIGH") | tostring),
+            "MEDIUM: " + (severity_count("MEDIUM") | tostring),
+            "LOW: " + (severity_count("LOW") | tostring),
+            "UNKNOWN: " + (severity_count("UNKNOWN") | tostring)
+        ]
+        | .[]
+    ' "$trivy_json_report" > "$summary_report"
+
+    cat "$summary_report"
 }
 
 function prechroot() {
@@ -124,42 +347,42 @@ function prechroot() {
 # function run_chroot() {
 
 #     # Launch into chroot environment to build install image.
-#     sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh -
+#     sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh -
 
 # }
 
 function chr_setup_host() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh setup_host
+    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh setup_host
     
 }
 
 function chr_install_pkg() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh install_pkg
+    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh install_pkg
     
 }
 
 function chr_customize_image() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh customize_image
+    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh customize_image
     
 }
 
 function chr_custom_conf() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh custom_conf
+    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh custom_conf
     
 }
 
 function chr_postpkginst() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh postpkginst
+    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh postpkginst
     
 }
 
 function chr_build_image() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh build_image
+    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh build_image
     
 }
 
 function chr_finish_up() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh finish_up
+    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh finish_up
     
 }
 
