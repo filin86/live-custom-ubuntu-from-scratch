@@ -9,6 +9,23 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 CMD=(setup_host debootstrap prechroot chr_setup_host chr_install_pkg chr_customize_image chr_custom_conf chr_postpkginst scan_vulnerabilities chr_build_image chr_finish_up postchroot build_iso)
 
 DATE=`TZ="UTC" date +"%y%m%d-%H%M%S"`
+ROOT_CMD=()
+
+function as_root() {
+    if [[ ${#ROOT_CMD[@]} -eq 0 ]]; then
+        "$@"
+    else
+        "${ROOT_CMD[@]}" "$@"
+    fi
+}
+
+function require_sudo() {
+    if ! command -v sudo >/dev/null 2>&1; then
+        >&2 echo "ERROR: sudo is required when running build.sh as a non-root user."
+        >&2 echo "Install sudo, or rerun inside a container with ALLOW_ROOT=1."
+        exit 1
+    fi
+}
 
 function help() {
     # if $1 is set, use $1 as headline message in help()
@@ -44,32 +61,47 @@ function find_index() {
 }
 
 function chroot_enter_setup() {
-    sudo mount --bind /dev chroot/dev
-    sudo mount --bind /run chroot/run
-    sudo chroot chroot mount none -t proc /proc
-    sudo chroot chroot mount none -t sysfs /sys
-    sudo chroot chroot mount none -t devpts /dev/pts
+    as_root mount --bind /dev chroot/dev
+    as_root mount --bind /run chroot/run
+    as_root chroot chroot mount none -t proc /proc
+    as_root chroot chroot mount none -t sysfs /sys
+    as_root chroot chroot mount none -t devpts /dev/pts
 }
 
 function chroot_exit_teardown() {
-    sudo chroot chroot umount /proc
-    sudo chroot chroot umount /sys
-    sudo chroot chroot umount /dev/pts
-    sudo umount chroot/dev
-    sudo umount chroot/run
+    as_root chroot chroot umount /proc
+    as_root chroot chroot umount /sys
+    as_root chroot chroot umount /dev/pts
+    as_root umount chroot/dev
+    as_root umount chroot/run
 }
 
 function check_host() {
     local os_ver
-    os_ver=`lsb_release -i | grep -E "(Ubuntu|Debian)"`
+    local allow_root
+
+    os_ver=""
+    if command -v lsb_release >/dev/null 2>&1; then
+        os_ver=$(lsb_release -i 2>/dev/null | grep -E "(Ubuntu|Debian)" || true)
+    fi
     if [[ -z "$os_ver" ]]; then
-        echo "WARNING : OS is not Debian or Ubuntu and is untested"
+        echo "WARNING : OS is not Debian or Ubuntu, or lsb_release is unavailable. This setup is untested."
     fi
 
-    if [ $(id -u) -eq 0 ]; then
-        echo "This script should not be run as 'root'"
+    allow_root="${ALLOW_ROOT:-0}"
+
+    if [ "$(id -u)" -eq 0 ]; then
+        if [[ "$allow_root" == "1" ]]; then
+            echo "WARNING : running as root because ALLOW_ROOT=1"
+            ROOT_CMD=()
+            return
+        fi
+        echo "This script should not be run as 'root'. Re-run as a regular user, or set ALLOW_ROOT=1 for a containerized build."
         exit 1
     fi
+
+    require_sudo
+    ROOT_CMD=(sudo)
 }
 
 # Load configuration values from file
@@ -97,9 +129,9 @@ function check_config() {
 
 function setup_host() {
     echo "=====> running setup_host ..."
-    sudo apt update
-    sudo apt install -y debootstrap squashfs-tools xorriso binutils zstd jq
-    sudo mkdir -p chroot
+    as_root apt update
+    as_root apt install -y debootstrap squashfs-tools xorriso binutils zstd jq
+    as_root mkdir -p chroot
 }
 
 function debootstrap() {
@@ -124,14 +156,27 @@ function debootstrap() {
         extractor_args=(--extractor=ar)
     fi
 
-    sudo debootstrap \
-        --verbose \
-        "${extractor_args[@]}" \
-        --arch=amd64 \
-        --variant=minbase \
-        $TARGET_UBUNTU_VERSION \
-        chroot \
-        $TARGET_UBUNTU_MIRROR
+    if [[ ${#ROOT_CMD[@]} -eq 0 ]]; then
+        command debootstrap \
+            --verbose \
+            "${extractor_args[@]}" \
+            --arch=amd64 \
+            --variant=minbase \
+            --include=ca-certificates \
+            "$TARGET_UBUNTU_VERSION" \
+            chroot \
+            "$TARGET_UBUNTU_MIRROR"
+    else
+        "${ROOT_CMD[@]}" debootstrap \
+            --verbose \
+            "${extractor_args[@]}" \
+            --arch=amd64 \
+            --variant=minbase \
+            --include=ca-certificates \
+            "$TARGET_UBUNTU_VERSION" \
+            chroot \
+            "$TARGET_UBUNTU_MIRROR"
+    fi
 }
 
 function scan_vulnerabilities() {
@@ -246,10 +291,10 @@ function scan_vulnerabilities() {
         fi
     } > "$metadata_report"
 
-    sudo cat chroot/etc/os-release > "$os_release_report"
+    as_root cat chroot/etc/os-release > "$os_release_report"
     {
         printf 'package\tversion\tarchitecture\n'
-        sudo chroot chroot dpkg-query -W --showformat='${Package}\t${Version}\t${Architecture}\n' | sort
+        as_root chroot chroot dpkg-query -W --showformat='${Package}\t${Version}\t${Architecture}\n' | sort
     } > "$package_inventory"
 
     package_count=$(tail -n +2 "$package_inventory" | wc -l | tr -d ' ')
@@ -336,10 +381,18 @@ function prechroot() {
     chroot_enter_setup
 
     # Setup build scripts in chroot environment
-    sudo ln -f $SCRIPT_DIR/chroot_build.sh chroot/root/chroot_build.sh
-    sudo ln -f $SCRIPT_DIR/default_config.sh chroot/root/default_config.sh
+    as_root install -m 0755 "$SCRIPT_DIR/chroot_build.sh" chroot/root/chroot_build.sh
+    as_root install -m 0644 "$SCRIPT_DIR/default_config.sh" chroot/root/default_config.sh
     if [[ -f "$SCRIPT_DIR/config.sh" ]]; then
-        sudo ln -f $SCRIPT_DIR/config.sh chroot/root/config.sh
+        as_root install -m 0644 "$SCRIPT_DIR/config.sh" chroot/root/config.sh
+    fi
+
+    if [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
+        as_root install -D -m 0644 /etc/ssl/certs/ca-certificates.crt \
+            chroot/usr/local/share/ca-certificates/inauto-host-ca.crt
+        if [[ -x chroot/usr/sbin/update-ca-certificates ]]; then
+            as_root chroot chroot update-ca-certificates
+        fi
     fi
 
 }
@@ -352,46 +405,46 @@ function prechroot() {
 # }
 
 function chr_setup_host() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh setup_host
+    as_root chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh setup_host
     
 }
 
 function chr_install_pkg() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh install_pkg
+    as_root chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh install_pkg
     
 }
 
 function chr_customize_image() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh customize_image
+    as_root chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh customize_image
     
 }
 
 function chr_custom_conf() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh custom_conf
+    as_root chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh custom_conf
     
 }
 
 function chr_postpkginst() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh postpkginst
+    as_root chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh postpkginst
     
 }
 
 function chr_build_image() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh build_image
+    as_root chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh build_image
     
 }
 
 function chr_finish_up() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh finish_up
+    as_root chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh finish_up
     
 }
 
 function postchroot() {
        # Cleanup after image changes
-    sudo rm -f chroot/root/chroot_build.sh
-    sudo rm -f chroot/root/default_config.sh
+    as_root rm -f chroot/root/chroot_build.sh
+    as_root rm -f chroot/root/default_config.sh
     if [[ -f "chroot/root/config.sh" ]]; then
-        sudo rm -f chroot/root/config.sh
+        as_root rm -f chroot/root/config.sh
     fi
 
     chroot_exit_teardown
@@ -401,11 +454,14 @@ function postchroot() {
 function build_iso() {
     echo "=====> running build_iso ..."
 
+    # Replace previous image artifacts to make repeated builds idempotent.
+    as_root rm -rf image
+
     # move image artifacts
-    sudo mv chroot/image .
+    as_root mv chroot/image .
 
     # compress rootfs
-    sudo mksquashfs chroot image/casper/filesystem.squashfs \
+    as_root mksquashfs chroot image/casper/filesystem.squashfs \
         -noappend -no-duplicates -no-recovery \
         -wildcards \
         -comp xz -b 1M -Xdict-size 100% \
@@ -417,11 +473,11 @@ function build_iso() {
         -e "swapfile"
 
     # write the filesystem.size
-    printf $(sudo du -sx --block-size=1 chroot | cut -f1) | sudo tee image/casper/filesystem.size
+    printf "%s" "$(as_root du -sx --block-size=1 chroot | cut -f1)" | as_root tee image/casper/filesystem.size
 
-    pushd $SCRIPT_DIR/image
+    pushd "$SCRIPT_DIR/image"
 
-    sudo xorriso \
+    as_root xorriso \
         -as mkisofs \
         -iso-level 3 \
         -full-iso9660-filenames \

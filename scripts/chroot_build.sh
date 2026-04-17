@@ -156,13 +156,13 @@ function install_pkg() {
             try_install_kernel_pkg linux-image-generic || true
         fi
 
-        if ! dpkg -s linux-image-generic >/dev/null 2>&1 && [[ "$TARGET_UBUNTU_MIRROR" != "http://archive.ubuntu.com/ubuntu/" ]]; then
+        if ! dpkg -s linux-image-generic >/dev/null 2>&1 && [[ "$TARGET_UBUNTU_MIRROR" != "https://archive.ubuntu.com/ubuntu/" ]]; then
             echo "WARNING: retrying kernel install from fallback mirror: archive.ubuntu.com"
             cat <<EOF > /etc/apt/sources.list
 
-deb http://archive.ubuntu.com/ubuntu/ $TARGET_UBUNTU_VERSION main restricted universe multiverse
-deb http://archive.ubuntu.com/ubuntu/ $TARGET_UBUNTU_VERSION-security main restricted universe multiverse
-deb http://archive.ubuntu.com/ubuntu/ $TARGET_UBUNTU_VERSION-updates main restricted universe multiverse
+deb https://archive.ubuntu.com/ubuntu/ $TARGET_UBUNTU_VERSION main restricted universe multiverse
+deb https://archive.ubuntu.com/ubuntu/ $TARGET_UBUNTU_VERSION-security main restricted universe multiverse
+deb https://archive.ubuntu.com/ubuntu/ $TARGET_UBUNTU_VERSION-updates main restricted universe multiverse
 EOF
             apt-get update
             try_install_kernel_pkg linux-image-generic || true
@@ -298,12 +298,12 @@ fi
 EOF
 
     # generate manifest
-    dpkg-query -W --showformat='${Package} ${Version}\n' | sudo tee casper/filesystem.manifest
+    dpkg-query -W --showformat='${Package} ${Version}\n' | tee casper/filesystem.manifest
 
     cp -v casper/filesystem.manifest casper/filesystem.manifest-desktop
 
     for pkg in $TARGET_PACKAGE_REMOVE; do
-        sudo sed -i "/$pkg/d" casper/filesystem.manifest-desktop
+        sed -i "/$pkg/d" casper/filesystem.manifest-desktop
     done
 
     # create diskdefines

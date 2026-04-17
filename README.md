@@ -2,7 +2,7 @@
 [![GitHub forks](https://img.shields.io/github/forks/mvallim/live-custom-ubuntu-from-scratch?style=social)](https://github.com/mvallim/live-custom-ubuntu-from-scratch/network/members)
 [![GitHub watchers](https://img.shields.io/github/watchers/mvallim/live-custom-ubuntu-from-scratch?style=social)](https://github.com/mvallim/live-custom-ubuntu-from-scratch/watchers)
 
-# How to create a custom Ubuntu live from scratch
+# Как создать собственный Ubuntu Live-образ с нуля
 
 [![Maintenance](https://img.shields.io/badge/Maintained%3F-yes-green.svg)](https://github.com/mvallim/live-custom-ubuntu-from-scratch/graphs/commit-activity)
 [![Project Status](https://img.shields.io/badge/status-active-success.svg)](https://github.com/mvallim/live-custom-ubuntu-from-scratch)
@@ -23,59 +23,103 @@
    <img src="images/live-boot.png">
 </p>
 
-This project guides you through building a fully customized version of Ubuntu Linux from scratch. It covers creating a live ISO image that includes pre-installed packages, configurations, and custom scripts tailored to your needs. The steps walk you through setting up the environment, configuring the chroot, installing software, modifying the kernel, and finally generating the ISO image. This is ideal for those who want complete control over their Linux distribution, whether for personal or professional use.
+Этот проект показывает, как собрать полностью кастомизированную версию Ubuntu Linux с нуля. Он охватывает создание live ISO-образа с заранее установленными пакетами, конфигурациями и пользовательскими скриптами под ваши задачи. Шаги проводят вас через подготовку окружения, настройку `chroot`, установку ПО, изменение ядра и финальную генерацию ISO. Такой подход подходит тем, кому нужен полный контроль над собственной сборкой Linux как для личного, так и для профессионального использования.
 
-## Requirements
+## Требования
 
-* Proficiency with Linux shell commands and scripting.
-* Sufficient disk space and memory for building an ISO.
+* Уверенное владение shell-командами и скриптами Linux.
+* Достаточный объем диска и памяти для сборки ISO.
 
-## Steps
-1. **Prepare the Environment**: Install necessary dependencies.
-2. **Create a Base System**: Use debootstrap to set up a minimal Ubuntu system.
-3. **Customize Packages**: Add/remove software, configure kernel.
-4. **Generate ISO**: Package the system into a bootable ISO.
+## Общая схема
+1. **Подготовить окружение**: установить необходимые зависимости.
+2. **Создать базовую систему**: использовать `debootstrap` для минимальной Ubuntu.
+3. **Настроить пакеты**: добавить или удалить ПО, настроить ядро.
+4. **Сгенерировать ISO**: упаковать систему в загрузочный образ.
 
-## Authors
+## Авторы
 
-* **Marcos Vallim** - *Founder, Author, Development, Test, Documentation* - [mvallim](https://github.com/mvallim)
-* **Ken Gilmer** -  *Commiter, Development, Test, Documentation* - [kgilmer](https://github.com/kgilmer)
+* **Marcos Vallim** - *Основатель, автор, разработка, тестирование, документация* - [mvallim](https://github.com/mvallim)
+* **Ken Gilmer** -  *Коммитер, разработка, тестирование, документация* - [kgilmer](https://github.com/kgilmer)
 
-See also the list of [contributors](CONTRIBUTORS.txt) who participated in this project.
+Список всех участников проекта доступен в файле [CONTRIBUTORS.txt](CONTRIBUTORS.txt).
 
-## Ways of Using this Tutorial
+## Как использовать этот туториал
 
-* (Recommended) follow the directions step by step below to understand how to build an Ubuntu ISO.
-* Run the `build.sh` script in the `scripts` directory after checking this repo out locally.
-* Fork this repo and run the github action `build`.  This will generate an ISO in your github account.
+* (Рекомендуется) пройти шаги ниже по порядку, чтобы понять процесс сборки Ubuntu ISO.
+* Запустить `./scripts/build-in-docker.sh -`, чтобы собирать образ внутри Docker builder-окружения с меньшей зависимостью от хоста.
+* Запустить скрипт `build.sh` в каталоге `scripts` после клонирования репозитория локально.
+* Сделать fork репозитория и запустить GitHub Action `build`. Он сгенерирует ISO в вашем GitHub-аккаунте.
 
 [![build-bionic](https://github.com/mvallim/live-custom-ubuntu-from-scratch/actions/workflows/build-bionic.yml/badge.svg)](https://github.com/mvallim/live-custom-ubuntu-from-scratch/actions/workflows/build-bionic.yml)
 [![build-focal](https://github.com/mvallim/live-custom-ubuntu-from-scratch/actions/workflows/build-focal.yml/badge.svg)](https://github.com/mvallim/live-custom-ubuntu-from-scratch/actions/workflows/build-focal.yml)
 [![build-jammy](https://github.com/mvallim/live-custom-ubuntu-from-scratch/actions/workflows/build-jammy.yml/badge.svg)](https://github.com/mvallim/live-custom-ubuntu-from-scratch/actions/workflows/build-jammy.yml)
 [![build-noble](https://github.com/mvallim/live-custom-ubuntu-from-scratch/actions/workflows/build-noble.yml/badge.svg)](https://github.com/mvallim/live-custom-ubuntu-from-scratch/actions/workflows/build-noble.yml)
 
-## Terms
+## Сборка в контейнере (рекомендуется для переносимой сборки)
 
-* `build system` - the computer environment running the build scripts that generate the ISO.
-* `live system` - the computer environment that runs from the live OS, generated by a `build system`.  This may also be referred to as the `chroot environment`.
-* `target system` - the computer environment that runs after installation has completed from a `live system`.
+В репозитории есть Docker wrapper `./scripts/build-in-docker.sh`. Он упаковывает зависимости хостовой части, запускает существующий pipeline `build.sh` внутри привилегированного контейнера и хранит тяжелый кэш `chroot` в именованном Docker volume вместо обычной файловой системы хоста.
 
-## Prerequisites (GNU/Linux Ubuntu)
+Это предпочтительный путь, если вы хотите сделать сборку менее зависимой от версии ОС хоста или запускать ее из Docker Desktop / WSL2 / с arm64-хостов, где доступна эмуляция контейнеров `amd64`.
+
+Требования:
+
+* Docker с включенными Linux-контейнерами
+* Возможность запускать привилегированные контейнеры (`docker run --privileged`)
+* Достаточно дискового пространства под Docker volume, используемый для `scripts/chroot`
+
+Запустить полный pipeline:
+
+```shell
+./scripts/build-in-docker.sh -
+```
+
+Запустить только часть этапов:
+
+```shell
+./scripts/build-in-docker.sh debootstrap - build_iso
+```
+
+Полезные переменные окружения:
+
+* `BUILDER_PLATFORM` — по умолчанию `linux/amd64`. Сохраняйте это значение, чтобы собирать текущий `amd64` ISO с `x86_64`, `arm64` или Windows-хостов, если Docker поддерживает эмуляцию `amd64`.
+* `DOCKER_USE_SUDO` — по умолчанию `auto`. Wrapper сначала пробует обычный доступ к Docker и при ошибке доступа к `docker.sock` автоматически переключается на `sudo docker`.
+* `REBUILD_BUILDER=1` — принудительно пересобирает Docker builder-образ.
+* `LIVECD_CHROOT_VOLUME` — переопределяет имя Docker volume, используемого для `scripts/chroot`.
+* `TRIVY_CACHE_VOLUME` — переопределяет имя Docker volume, используемого для базы данных Trivy.
+
+Артефакты, которые появляются после контейнерной сборки:
+
+* `scripts/*.iso`
+* `scripts/image/md5sum.txt`
+* `scripts/reports/`
 
 > [!IMPORTANT]
-> It is very important to remember that the version you are generating depends on the version being used on the host machine.
+> Builder-окружение теперь переносимо между разными хост-платформами, но схема загрузки ISO в этом репозитории пока все еще жестко завязана на `amd64/x86_64`. Для полноценной сборки non-amd64 ISO понадобятся дополнительные изменения в загрузчиках и пакетах внутри build-скриптов.
+
+## Термины
+
+* `build system` - компьютерная среда, в которой запускаются скрипты сборки, генерирующие ISO.
+* `live system` - среда, работающая из live ОС, созданной `build system`. Ее также можно называть `chroot environment`.
+* `target system` - среда, в которой работает установленная система после завершения установки из `live system`.
+
+## Предварительные требования для нативного режима на хосте (GNU/Linux Ubuntu)
+
+Этот раздел относится к сценарию, когда вы запускаете `./scripts/build.sh` напрямую на хосте, а не используете `./scripts/build-in-docker.sh`.
+
+> [!IMPORTANT]
+> Очень важно помнить, что версия собираемой системы зависит от версии, установленной на хостовой машине.
 >
-> Example:
-> If I am generating a from scratch `bionic` version, it is necessary for the host machine to have a `bionic` version or higher installed.
+> Пример:
+> Если вы собираете версию `bionic` с нуля, то на хостовой машине должна быть установлена `bionic` или более новая версия.
 >
-> | Scratch  | Host        |
+> | Сборка   | Хост        |
 > |:--------:|:-----------:|
 > | `bionic` | `>= bionic` |
 > | `focal`  | `>= focal`  |
 > | `jammy`  | `>= jammy`  |
 > | `noble`  | `>= noble`  |
 
-Install packages we need in the `build system` required by our scripts.
+Установите пакеты, которые нужны нашим скриптам в `build system`.
 
 ```shell
 sudo apt-get install \
@@ -88,11 +132,11 @@ sudo apt-get install \
 mkdir $HOME/live-ubuntu-from-scratch
 ```
 
-## Bootstrap and Configure Ubuntu
+## Bootstrap и настройка Ubuntu
 
-`debootstrap` is a program for generating OS images.  We install it into our `build system` to begin generating our ISO.
+`debootstrap` — это программа для генерации образов ОС. Мы устанавливаем ее в `build system`, чтобы начать создание ISO.
 
-* Checkout bootstrap
+* Выполните bootstrap
 
   ```shell
   sudo debootstrap \
@@ -103,9 +147,9 @@ mkdir $HOME/live-ubuntu-from-scratch
      http://us.archive.ubuntu.com/ubuntu/
   ```
   
-  > **debootstrap** is used to create a Debian base system from scratch, without requiring the availability of **dpkg** or **apt**. It does this by downloading .deb files from a mirror site, and carefully unpacking them into a directory which can eventually be **chrooted** into.
+  > **debootstrap** используется для создания базовой Debian-системы с нуля, без необходимости иметь заранее установленный **dpkg** или **apt**. Он скачивает `.deb`-пакеты с зеркала и аккуратно распаковывает их в каталог, в который затем можно войти через **chroot**.
 
-* Configure external mount points
+* Настройте внешние точки монтирования
   
   ```shell
   sudo mount --bind /dev $HOME/live-ubuntu-from-scratch/chroot/dev
@@ -113,23 +157,23 @@ mkdir $HOME/live-ubuntu-from-scratch
   sudo mount --bind /run $HOME/live-ubuntu-from-scratch/chroot/run
   ```
 
-  As we will be updating and installing packages (grub among them), these mount points are necessary inside the chroot environment, so we are able to finish the installation without errors.
+  Поскольку дальше мы будем обновлять систему и устанавливать пакеты (в том числе `grub`), эти точки монтирования необходимы внутри `chroot`-окружения, чтобы установка завершалась без ошибок.
 
-## Define chroot environment
+## Определение `chroot`-окружения
 
-*A chroot on Unix operating systems is an operation that changes the apparent root directory for the current running process and its children. A program that is run in such a modified environment cannot name (and therefore normally cannot access) files outside the designated directory tree. The term "chroot" may refer to the chroot system call or the chroot wrapper program. The modified environment is called a chroot jail.*
+*В Unix-подобных операционных системах `chroot` — это операция, меняющая видимый корень файловой системы для текущего процесса и его потомков. Программа, запущенная в таком окружении, не может обращаться к файлам за пределами указанного дерева каталогов. Термин `chroot` может означать как системный вызов, так и обертку над ним. Модифицированная среда называется `chroot jail`.*
 
-> Reference: <https://en.wikipedia.org/wiki/Chroot>
+> Источник: <https://en.wikipedia.org/wiki/Chroot>
 
-From this point we will be configuring the `live system`.
+Начиная с этого момента, мы настраиваем `live system`.
 
-1. **Access chroot environment**
+1. **Войти в `chroot`-окружение**
 
    ```shell
    sudo chroot $HOME/live-ubuntu-from-scratch/chroot
    ```
 
-2. **Configure mount points, home and locale**
+2. **Настроить точки монтирования, домашний каталог и locale**
 
    ```shell
    mount none -t proc /proc
@@ -143,15 +187,15 @@ From this point we will be configuring the `live system`.
    export LC_ALL=C
    ```
 
-   These mount points are necessary inside the chroot environment, so we are able to finish the installation without errors.
+   Эти точки монтирования нужны внутри `chroot`-окружения, чтобы установка и настройка пакетов завершались без ошибок.
 
-3. **Set a custom hostname**
+3. **Задать собственное имя хоста**
 
    ```shell
    echo "ubuntu-fs-live" > /etc/hostname
    ```
 
-4. **Configure apt sources.list**
+4. **Настроить `apt sources.list`**
 
    ```shell
    cat <<EOF > /etc/apt/sources.list
@@ -166,21 +210,21 @@ From this point we will be configuring the `live system`.
    EOF
    ```
 
-5. **Update indexes packages**
+5. **Обновить индексы пакетов**
 
    ```shell
    apt-get update
    ```
 
-6. **Install systemd**
+6. **Установить `systemd`**
 
    ```shell
    apt-get install -y libterm-readline-gnu-perl systemd-sysv
    ```
 
-   > **systemd** is a system and service manager for Linux. It provides aggressive parallelization capabilities, uses socket and D-Bus activation for starting services, offers on-demand starting of daemons, keeps track of processes using Linux control groups, maintains mount and automount points and implements an elaborate transactional dependency-based service control logic.
+   > **systemd** — это системный и сервисный менеджер для Linux. Он обеспечивает агрессивную параллелизацию, использует socket- и D-Bus-активацию для запуска сервисов, умеет запускать демоны по требованию, отслеживает процессы через control groups, управляет точками монтирования и автомонтирования и реализует развитую транзакционную логику зависимостей.
 
-7. **Configure machine-id and divert**
+7. **Настроить `machine-id` и diversion**
 
    ```shell
    dbus-uuidgen > /etc/machine-id
@@ -188,7 +232,7 @@ From this point we will be configuring the `live system`.
    ln -fs /etc/machine-id /var/lib/dbus/machine-id
    ```
 
-   > The `/etc/machine-id` file contains the unique machine ID of the local system that is set during installation or boot. The machine ID is a single newline-terminated, hexadecimal, 32-character, lowercase ID. When decoded from hexadecimal, this corresponds to a 16-byte/128-bit value. This ID may not be all zeros.
+   > Файл `/etc/machine-id` содержит уникальный идентификатор локальной системы, который задается во время установки или загрузки. Это одна строка из 32 шестнадцатеричных символов в нижнем регистре, соответствующая 16-байтовому/128-битному значению. Этот идентификатор не должен состоять из нулей.
 
    ```shell
    dpkg-divert --local --rename --add /sbin/initctl
@@ -196,15 +240,15 @@ From this point we will be configuring the `live system`.
    ln -s /bin/true /sbin/initctl
    ```
 
-   > **dpkg-divert** is the utility used to set up and update the list of diversions.
+   > **dpkg-divert** — утилита, которая используется для создания и обновления списка diversion-правил.
 
-8. **Upgrade packages**
+8. **Обновить пакеты**
 
    ```shell
    apt-get -y upgrade
    ```
 
-9. **Install packages needed for Live System**
+9. **Установить пакеты, необходимые для Live System**
 
    ```shell
    apt-get install -y \
@@ -234,7 +278,7 @@ From this point we will be configuring the `live system`.
    apt-get install -y --no-install-recommends linux-generic
    ```
 
-10. **Graphical installer**
+10. **Графический установщик**
 
     ```shell
     apt-get install -y \
@@ -245,9 +289,9 @@ From this point we will be configuring the `live system`.
        ubiquity-ubuntu-artwork
     ```
 
-    The next steps will appear, as a result of the packages that will be installed from the previous step, this will happen without anything having  to be informed or executed.
+    Следующие шаги появятся автоматически как результат установки пакетов на предыдущем этапе — ничего дополнительно вводить или запускать не потребуется.
 
-    1. Configure keyboard
+    1. Настройка клавиатуры
 
        <p align="center">
        <img src="images/keyboard-configure-01.png">
@@ -257,13 +301,13 @@ From this point we will be configuring the `live system`.
        <img src="images/keyboard-configure-02.png">
        </p>
 
-    2. Console setup
+    2. Настройка консоли
 
        <p align="center">
        <img src="images/console-configure-01.png">
        </p>
 
-11. **Install window manager**
+11. **Установить оконное окружение**
 
     ```shell
     apt-get install -y \
@@ -272,7 +316,7 @@ From this point we will be configuring the `live system`.
        ubuntu-gnome-wallpapers
     ```
 
-12. **Install useful applications**
+12. **Установить полезные приложения**
 
     ```shell
     apt-get install -y \
@@ -285,9 +329,9 @@ From this point we will be configuring the `live system`.
        less
     ```
 
-13. **Install Visual Studio Code (optional)**
+13. **Установить Visual Studio Code (необязательно)**
 
-    1. Download and install the key
+    1. Скачать и установить ключ
 
        ```shell
        curl https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > microsoft.gpg
@@ -299,7 +343,7 @@ From this point we will be configuring the `live system`.
        rm microsoft.gpg
        ```
 
-    2. Then update the package cache and install the package using
+    2. Затем обновить кэш пакетов и установить пакет
 
        ```shell
        apt-get update
@@ -307,9 +351,9 @@ From this point we will be configuring the `live system`.
        apt-get install -y code
        ```
 
-14. **Install Google Chrome (optional)**
+14. **Установить Google Chrome (необязательно)**
 
-    1. Download and install the key
+    1. Скачать и установить ключ
 
        ```shell
        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
@@ -317,7 +361,7 @@ From this point we will be configuring the `live system`.
        echo "deb http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
        ```
 
-    2. Then update the package cache and install the package using
+    2. Затем обновить кэш пакетов и установить пакет
 
        ```shell
        apt-get update
@@ -325,7 +369,7 @@ From this point we will be configuring the `live system`.
        apt-get install google-chrome-stable
        ```
 
-15. **Install Java JDK 8 (optional)**
+15. **Установить Java JDK 8 (необязательно)**
 
     ```shell
     apt-get install -y \
@@ -333,7 +377,7 @@ From this point we will be configuring the `live system`.
         openjdk-8-jre
     ```
 
-16. **Remove unused applications (optional)**
+16. **Удалить ненужные приложения (необязательно)**
 
     ```shell
     apt-get purge -y \
@@ -346,33 +390,33 @@ From this point we will be configuring the `live system`.
        hitori
     ```
 
-17. **Remove unused packages**
+17. **Удалить неиспользуемые пакеты**
 
     ```shell
     apt-get autoremove -y
     ```
 
-18. **Reconfigure packages**
+18. **Перенастроить пакеты**
 
-    1. Generate locales
+    1. Сгенерировать locale
 
        ```shell
        dpkg-reconfigure locales
        ```
 
-       1. *Select locales*
+       1. *Выбрать locales*
           <p align="center">
           <img src="images/locales-select.png">
           </p>
 
-       2. *Select default locale*
+       2. *Выбрать locale по умолчанию*
           <p align="center">
           <img src="images/locales-default.png">
           </p>
 
-    2. Configure network-manager
+    2. Настроить `network-manager`
 
-       1. Create config file
+       1. Создать конфигурационный файл
 
           ```shell
           cat <<EOF > /etc/NetworkManager/NetworkManager.conf
@@ -386,23 +430,23 @@ From this point we will be configuring the `live system`.
           EOF
           ```
 
-       2. Reconfigure network-manager
+       2. Перенастроить `network-manager`
 
           ```shell
           dpkg-reconfigure network-manager
           ```
 
-## Create the image directory and populate it
+## Создание каталога образа и наполнение его файлами
 
-We are now back in our `build environment` after setting up our `live system` and will continue creating files necessary to generate the ISO.
+Теперь, после настройки `live system`, мы возвращаемся в наше `build environment` и продолжаем создавать файлы, необходимые для генерации ISO.
 
-1. Create directories
+1. Создать каталоги
 
    ```shell
    mkdir -p /image/{casper,isolinux,install}
    ```
 
-2. Copy kernel images
+2. Скопировать образы ядра
 
    ```shell
    cp /boot/vmlinuz-**-**-generic /image/casper/vmlinuz
@@ -410,7 +454,7 @@ We are now back in our `build environment` after setting up our `live system` an
    cp /boot/initrd.img-**-**-generic /image/casper/initrd
    ```
 
-3. Copy memtest86+ binary (BIOS and UEFI)
+3. Скопировать бинарник `memtest86+` (BIOS и UEFI)
 
    ```shell
     wget --progress=dot https://memtest.org/download/v7.00/mt86plus_7.00.binaries.zip -O /image/install/memtest86.zip
@@ -419,15 +463,15 @@ We are now back in our `build environment` after setting up our `live system` an
     rm -f /image/install/memtest86.zip
    ```
 
-### GRUB menu configuration
+### Настройка меню GRUB
 
-   1. Create base point access file for grub
+   1. Создать файл-маркер для поиска корня в grub
 
       ```shell
       touch /image/ubuntu
       ```
 
-   2. Create image/isolinux/grub.cfg
+   2. Создать `image/isolinux/grub.cfg`
 
       ```shell
       cat <<EOF > /image/isolinux/grub.cfg
@@ -471,12 +515,11 @@ We are now back in our `build environment` after setting up our `live system` an
       EOF
       ```
 
-### Create manifest
+### Создание manifest
 
-Next we create a file `filesystem.manifest` to specify each package and it's version that is installed on the `live system`.  We create another file `filesystem.manifest-desktop` which specifies which files will be installed on the `target system`.  Once the Ubiquity installer completes, it will
-remove packages specified in `filesystem.manifest` that are *not* listed in `filesystem.manifest-desktop`.
+Далее мы создаем файл `filesystem.manifest`, в котором указывается каждый пакет и его версия, установленные в `live system`. Затем создается файл `filesystem.manifest-desktop`, определяющий, какие пакеты должны остаться в `target system`. После завершения работы установщика Ubiquity из системы будут удалены пакеты, перечисленные в `filesystem.manifest`, но отсутствующие в `filesystem.manifest-desktop`.
 
-1. Generate manifest
+1. Сгенерировать manifest
 
    ```shell
    dpkg-query -W --showformat='${Package} ${Version}\n' | sudo tee /image/casper/filesystem.manifest
@@ -494,11 +537,11 @@ remove packages specified in `filesystem.manifest` that are *not* listed in `fil
    sed -i '/os-prober/d' /image/casper/filesystem.manifest-desktop
    ```
 
-### Create diskdefines
+### Создание `README.diskdefines`
 
-**README** file often found on Linux LiveCD installer discs, such as an Ubuntu Linux installation CD; typically named “**README.diskdefines**” and may be referenced during installation.
+Файл **README**, часто встречающийся на установочных Linux LiveCD, например на установочном диске Ubuntu, обычно называется `README.diskdefines` и может использоваться во время установки.
 
-1. Create file /image/README.diskdefines
+1. Создать файл `/image/README.diskdefines`
 
    ```shell
    cat <<EOF > /image/README.diskdefines
@@ -514,15 +557,15 @@ remove packages specified in `filesystem.manifest` that are *not* listed in `fil
    EOF
    ```
 
-### Creating image
+### Сборка файлов образа
 
-1. Access image directory
+1. Перейти в каталог образа
 
    ```shell
    cd /image
    ```
 
-2. Copy EFI loaders
+2. Скопировать EFI-загрузчики
 
    ```shell
    cp /usr/lib/shim/shimx64.efi.signed.previous isolinux/bootx64.efi
@@ -530,7 +573,7 @@ remove packages specified in `filesystem.manifest` that are *not* listed in `fil
    cp /usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed isolinux/grubx64.efi
    ```
 
-3. Create a FAT16 UEFI boot disk image containing the EFI bootloaders
+3. Создать FAT16 UEFI boot disk image с EFI-загрузчиками
 
    ```shell
    (
@@ -545,7 +588,7 @@ remove packages specified in `filesystem.manifest` that are *not* listed in `fil
    )
    ```
 
-4. Create a grub BIOS image
+4. Создать BIOS-образ `grub`
 
    ```shell
    grub-mkstandalone \
@@ -558,27 +601,27 @@ remove packages specified in `filesystem.manifest` that are *not* listed in `fil
       "boot/grub/grub.cfg=isolinux/grub.cfg"
    ```
 
-5. Combine a bootable Grub cdboot.img
+5. Собрать загрузочный `Grub cdboot.img`
 
    ```shell
    cat /usr/lib/grub/i386-pc/cdboot.img isolinux/core.img > isolinux/bios.img
    ```
 
-6. Generate md5sum.txt
+6. Сгенерировать `md5sum.txt`
 
    ```shell
    /bin/bash -c "(find . -type f -print0 | xargs -0 md5sum | grep -v -e 'isolinux' > md5sum.txt)"
    ```
 
-### Cleanup the chroot environment
+### Очистка `chroot`-окружения
 
-   1. If you installed software, be sure to run
+   1. Если вы устанавливали программное обеспечение, обязательно выполните
 
       ```shell
       truncate -s 0 /etc/machine-id
       ```
 
-   2. Remove the diversion
+   2. Удалите diversion
 
       ```shell
       rm /sbin/initctl
@@ -586,7 +629,7 @@ remove packages specified in `filesystem.manifest` that are *not* listed in `fil
       dpkg-divert --rename --remove /sbin/initctl
       ```
 
-   3. Clean up
+   3. Выполните очистку
 
       ```shell
       apt-get clean
@@ -604,7 +647,7 @@ remove packages specified in `filesystem.manifest` that are *not* listed in `fil
       exit
       ```
 
-## Unbind mount points
+## Отвязать точки монтирования
 
 ```shell
 sudo umount $HOME/live-ubuntu-from-scratch/chroot/dev
@@ -612,23 +655,23 @@ sudo umount $HOME/live-ubuntu-from-scratch/chroot/dev
 sudo umount $HOME/live-ubuntu-from-scratch/chroot/run
 ```
 
-## Compress the chroot
+## Сжать `chroot`
 
-After everything has been installed and preconfigured in the **chrooted** environment, we need to generate an image of everything that was done by following the next steps in the `build environment`.
+После того как в **chrooted**-окружении все установлено и предварительно настроено, нужно сгенерировать образ результатов этих действий, выполняя следующие шаги уже в `build environment`.
 
-1. Access build directory
+1. Перейти в каталог сборки
 
    ```shell
    cd $HOME/live-ubuntu-from-scratch
    ```
 
-2. Move image artifacts
+2. Переместить артефакты образа
 
    ```shell
    sudo mv chroot/image .
    ```
 
-3. Create squashfs
+3. Создать `squashfs`
 
    ```shell
    sudo mksquashfs chroot image/casper/filesystem.squashfs \
@@ -643,24 +686,24 @@ After everything has been installed and preconfigured in the **chrooted** enviro
       -e "swapfile"
    ```
 
-   > **Squashfs** is a highly compressed read-only filesystem for Linux. It uses zlib compression to compress both files, inodes and directories. Inodes in the system are very small and all blocks are packed to minimize data overhead. Block sizes greater than 4K are supported up to a maximum of 64K.
-   > **Squashfs** is intended for general read-only filesystem use, for archival use (i.e. in cases where a .tar.gz file may be used), and in constrained block device/memory systems (e.g. **embedded systems**) where low overhead is needed.
+   > **Squashfs** — это сильно сжатая read-only файловая система для Linux. Она использует `zlib` для сжатия файлов, inode'ов и каталогов. Inode'ы в такой системе очень малы, а все блоки упаковываются так, чтобы минимизировать накладные расходы. Поддерживаются размеры блока больше 4K, вплоть до 64K.
+   > **Squashfs** предназначена для общего использования в read-only системах, для архивирования (например, в случаях, где мог бы использоваться `.tar.gz`) и для ограниченных по памяти или блочным устройствам систем (например, **embedded systems**), где важны низкие накладные расходы.
 
-4. Write the filesystem.size
+4. Записать `filesystem.size`
 
    ```shell
    printf $(sudo du -sx --block-size=1 chroot | cut -f1) | sudo tee image/casper/filesystem.size
    ```
 
-## Create ISO Image for a LiveCD (BIOS + UEFI + Secure Boot)
+## Создание ISO-образа LiveCD (BIOS + UEFI + Secure Boot)
 
-1. Access build directory
+1. Перейти в каталог сборки
 
    ```shell
    cd $HOME/live-ubuntu-from-scratch/image
    ```
 
-2. Create iso from the image directory using the command-line
+2. Создать ISO из каталога образа через командную строку
 
    ```shell
    sudo xorriso \
@@ -699,9 +742,9 @@ After everything has been installed and preconfigured in the **chrooted** enviro
          "."
    ```
 
-## Alternative way, if previous one fails, create an Hybrid ISO
+## Альтернативный способ: если предыдущий не сработал, создать Hybrid ISO
 
-1. Create a ISOLINUX (syslinux) boot menu
+1. Создать загрузочное меню ISOLINUX (`syslinux`)
 
    ```shell
    cat <<EOF> isolinux/isolinux.cfg
@@ -735,7 +778,7 @@ After everything has been installed and preconfigured in the **chrooted** enviro
    EOF
    ```
 
-2. Include syslinux bios modules
+2. Добавить BIOS-модули `syslinux`
 
    ```shell
    apt install -y syslinux-common && \
@@ -743,13 +786,13 @@ After everything has been installed and preconfigured in the **chrooted** enviro
    cp /usr/lib/syslinux/modules/bios/* image/isolinux/
    ```
 
-3. Access build directory
+3. Перейти в каталог сборки
 
    ```shell
    cd $HOME/live-ubuntu-from-scratch/image
    ```
 
-4. Create iso from the image directory
+4. Создать ISO из каталога образа
 
    ```shell
    sudo xorriso \
@@ -774,26 +817,26 @@ After everything has been installed and preconfigured in the **chrooted** enviro
       "$HOME/live-ubuntu-from-scratch/image"
    ```
 
-## Make a bootable USB image
+## Создание загрузочного USB-образа
 
-It is simple and easy, using "dd"
+Это можно сделать просто и быстро с помощью `dd`.
 
 ```shell
 sudo dd if=ubuntu-from-scratch.iso of=<device> status=progress oflag=sync bs=4M
 ```
 
-## Summary
+## Итог
 
-This completes the process of creating a live Ubuntu installer from scratch.  The generated ISO may be tested in a virtual machine such as `VirtualBox` or written to media and booted from a standard PC.
+На этом процесс создания live Ubuntu installer с нуля завершен. Полученный ISO можно проверить в виртуальной машине, например в `VirtualBox`, либо записать на носитель и загрузить на обычном ПК.
 
-## Contributing
+## Вклад в проект
 
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduct, and the process for submitting pull requests to us.
+Подробности о правилах взаимодействия и процессе отправки pull request смотрите в [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Versioning
+## Версионирование
 
-We use [GitHub](https://github.com/mvallim/live-custom-ubuntu-from-scratch) for versioning. For the versions available, see the [tags on this repository](https://github.com/mvallim/live-custom-ubuntu-from-scratch/tags).
+Для версионирования используется [GitHub](https://github.com/mvallim/live-custom-ubuntu-from-scratch). Список доступных версий можно посмотреть по [тегам этого репозитория](https://github.com/mvallim/live-custom-ubuntu-from-scratch/tags).
 
-## License
+## Лицензия
 
-This project is licensed under the GNU GENERAL PUBLIC LICENSE - see the [LICENSE](LICENSE) file for details
+Проект распространяется по лицензии GNU GENERAL PUBLIC LICENSE. Подробности смотрите в файле [LICENSE](LICENSE).

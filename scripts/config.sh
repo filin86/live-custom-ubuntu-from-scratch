@@ -11,7 +11,7 @@ export TARGET_UBUNTU_VERSION="noble"
 
 # The Ubuntu Mirror URL. It's better to change for faster download.
 # More mirrors see: https://launchpad.net/ubuntu/+archivemirrors
-export TARGET_UBUNTU_MIRROR="http://archive.ubuntu.com/ubuntu/"
+export TARGET_UBUNTU_MIRROR="https://archive.ubuntu.com/ubuntu/"
 
 # The packaged version of the Linux kernel to install on target image.
 export TARGET_KERNEL_PACKAGE="linux-generic"
@@ -52,7 +52,17 @@ XDG_CONFIG_DIRS="/etc/xdg"
 
 AUTOLOGIN_USER="ubuntu"
 AUTOLOGIN_SESSION="xfce"
-DOCKER_DATA_ROOT="$HOMEPATH/docker"
+DOCKER_DATA_ROOT="/var/lib/docker"
+CONTAINERD_DATA_ROOT="/var/lib/containerd"
+DOCKER_STATE_ROOT="$HOMEPATH/staff/docker"
+DOCKER_DATA_IMAGE="$DOCKER_STATE_ROOT/docker-data.ext4"
+DOCKER_STORAGE_MOUNT="/var/lib/inauto/container-store"
+DOCKER_DATA_IMAGE_SIZE="20G"
+DOCKER_SYSTEM_CONFIG="$HOMEPATH/staff/docker-config/root"
+DOCKER_USER_CONFIG_ROOT="$HOMEPATH/staff/docker-config"
+DOCKER_STORAGE_SCRIPT="setup-docker-storage.sh"
+DOCKER_PROFILE_SCRIPT="inauto-docker-env.sh"
+DOCKER_COMPOSE_RESTORE_SCRIPT="restore-docker-compose.sh"
 
 DEFAULT_LOCALE="ru_RU.UTF-8"
 FALLBACK_LOCALE="en_US.UTF-8"
@@ -96,6 +106,8 @@ function custom_conf() {
         OnStartBeforeLogin.service \
         OnStartOneShot.service \
         OnStartForking.service \
+        DockerPersistentStorage.service \
+        DockerComposeRestore.service \
         containerd.service \
         docker.service \
         docker.socket \
@@ -229,7 +241,7 @@ EOF_DESKTOP
 # Package customisation function. Update this function to customize packages
 # present on the installed system.
 function customize_image() {
-    # install graphics and desktop (LXQt based)
+    # install graphics and desktop (XFCE based)
     apt-get install -y \
         xorg \
         lightdm \
@@ -267,7 +279,8 @@ function customize_image() {
         rsync \
         ufw \
         x11vnc \
-        dbus-x11
+        dbus-x11 \
+        e2fsprogs
 
     install_docker_engine
 }
@@ -426,6 +439,182 @@ EOF_DOCKER_COMPOSE
     chmod 755 /usr/local/bin/docker-compose
 }
 
+function make_docker_storage_script() {
+    cat <<EOF_SCRIPT > "$ETCPATH/$DOCKER_STORAGE_SCRIPT"
+#!/bin/bash
+set -euo pipefail
+
+PERSISTENT_ROOT="$HOMEPATH"
+LOCKFILE=".inautolock"
+CONTAINER_STORE_MOUNT="$DOCKER_STORAGE_MOUNT"
+DOCKER_ROOT="$DOCKER_DATA_ROOT"
+CONTAINERD_ROOT="$CONTAINERD_DATA_ROOT"
+DOCKER_STATE_ROOT="$DOCKER_STATE_ROOT"
+DOCKER_IMAGE="$DOCKER_DATA_IMAGE"
+DOCKER_IMAGE_SIZE="$DOCKER_DATA_IMAGE_SIZE"
+DOCKER_SYSTEM_CONFIG="$DOCKER_SYSTEM_CONFIG"
+
+log() {
+    echo "[docker-storage] \$*"
+}
+
+ensure_system_config() {
+    mkdir -p "\$DOCKER_SYSTEM_CONFIG"
+    chmod 700 "\$DOCKER_SYSTEM_CONFIG"
+}
+
+if [[ ! -f "\$PERSISTENT_ROOT/\$LOCKFILE" ]] || ! mountpoint -q "\$PERSISTENT_ROOT"; then
+    log "persistent storage is unavailable, Docker and containerd will use ephemeral storage"
+    mkdir -p "\$DOCKER_ROOT" "\$CONTAINERD_ROOT"
+    exit 0
+fi
+
+mkdir -p "\$DOCKER_ROOT" "\$CONTAINERD_ROOT" "\$DOCKER_STATE_ROOT" "\$CONTAINER_STORE_MOUNT"
+ensure_system_config
+
+if mountpoint -q "\$CONTAINER_STORE_MOUNT" && mountpoint -q "\$DOCKER_ROOT" && mountpoint -q "\$CONTAINERD_ROOT"; then
+    log "persistent container storage is already mounted"
+    exit 0
+fi
+
+if [[ ! -f "\$DOCKER_IMAGE" ]]; then
+    log "creating container storage image \$DOCKER_IMAGE (\$DOCKER_IMAGE_SIZE)"
+    truncate -s "\$DOCKER_IMAGE_SIZE" "\$DOCKER_IMAGE"
+    mkfs.ext4 -F -L INAUTO_DOCKER "\$DOCKER_IMAGE"
+fi
+
+if e2fsck -p "\$DOCKER_IMAGE"; then
+    :
+else
+    fsck_status=\$?
+    if (( fsck_status > 1 )); then
+        log "e2fsck failed for \$DOCKER_IMAGE with code \$fsck_status"
+        exit "\$fsck_status"
+    fi
+fi
+
+if ! mountpoint -q "\$CONTAINER_STORE_MOUNT"; then
+    mount -o loop,noatime "\$DOCKER_IMAGE" "\$CONTAINER_STORE_MOUNT"
+fi
+
+mkdir -p "\$CONTAINER_STORE_MOUNT/docker" "\$CONTAINER_STORE_MOUNT/containerd"
+
+if ! mountpoint -q "\$DOCKER_ROOT"; then
+    mount --bind "\$CONTAINER_STORE_MOUNT/docker" "\$DOCKER_ROOT"
+fi
+
+if ! mountpoint -q "\$CONTAINERD_ROOT"; then
+    mount --bind "\$CONTAINER_STORE_MOUNT/containerd" "\$CONTAINERD_ROOT"
+fi
+
+log "mounted persistent Docker storage at \$DOCKER_ROOT"
+log "mounted persistent containerd storage at \$CONTAINERD_ROOT"
+EOF_SCRIPT
+
+    chmod 755 "$ETCPATH/$DOCKER_STORAGE_SCRIPT"
+}
+
+function make_docker_profile_script() {
+    mkdir -p /etc/profile.d
+    cat <<EOF_PROFILE > "/etc/profile.d/$DOCKER_PROFILE_SCRIPT"
+#!/bin/sh
+
+if [ -f "$HOMEPATH/.inautolock" ] && [ -d "$DOCKER_USER_CONFIG_ROOT" ]; then
+    docker_user=\${USER:-\$(id -un 2>/dev/null || echo default)}
+    export DOCKER_CONFIG="$DOCKER_USER_CONFIG_ROOT/\$docker_user"
+fi
+EOF_PROFILE
+
+    chmod 644 "/etc/profile.d/$DOCKER_PROFILE_SCRIPT"
+}
+
+function make_docker_compose_restore_script() {
+    cat <<EOF_SCRIPT > "$ETCPATH/$DOCKER_COMPOSE_RESTORE_SCRIPT"
+#!/bin/bash
+set -euo pipefail
+
+export DOCKER_CONFIG="$DOCKER_SYSTEM_CONFIG"
+
+log() {
+    echo "[docker-compose-restore] \$*"
+}
+
+if ! command -v docker >/dev/null 2>&1; then
+    log "docker CLI is unavailable"
+    exit 0
+fi
+
+if ! docker info >/dev/null 2>&1; then
+    log "docker daemon is unavailable"
+    exit 0
+fi
+
+mapfile -t container_ids < <(docker container ls -aq --filter label=com.docker.compose.project | sort -u)
+if [[ \${#container_ids[@]} -eq 0 ]]; then
+    log "no compose-managed containers found"
+    exit 0
+fi
+
+declare -A seen_projects=()
+
+for container_id in "\${container_ids[@]}"; do
+    project_key=\$(docker container inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}|{{ index .Config.Labels "com.docker.compose.project.working_dir" }}|{{ index .Config.Labels "com.docker.compose.project.config_files" }}' "\$container_id" 2>/dev/null || true)
+    project_name=\${project_key%%|*}
+    rest=\${project_key#*|}
+    working_dir=\${rest%%|*}
+    config_files=\${rest#*|}
+
+    if [[ -z "\$project_name" || -z "\$working_dir" ]]; then
+        continue
+    fi
+
+    seen_projects["\$project_name|\$working_dir|\$config_files"]=1
+done
+
+for project in "\${!seen_projects[@]}"; do
+    project_name=\${project%%|*}
+    rest=\${project#*|}
+    working_dir=\${rest%%|*}
+    config_files=\${rest#*|}
+    compose_args=(-p "\$project_name" --project-directory "\$working_dir")
+    missing_file=0
+
+    if [[ ! -d "\$working_dir" ]]; then
+        log "skip \$project_name: project directory \$working_dir is missing"
+        continue
+    fi
+
+    if [[ -n "\$config_files" ]]; then
+        IFS=',' read -r -a config_file_list <<< "\$config_files"
+        for config_file in "\${config_file_list[@]}"; do
+            [[ -n "\$config_file" ]] || continue
+
+            if [[ "\$config_file" != /* ]]; then
+                config_file="\$working_dir/\$config_file"
+            fi
+
+            if [[ ! -f "\$config_file" ]]; then
+                log "skip \$project_name: compose file \$config_file is missing"
+                missing_file=1
+                break
+            fi
+
+            compose_args+=(-f "\$config_file")
+        done
+    fi
+
+    if (( missing_file )); then
+        continue
+    fi
+
+    log "restoring compose project \$project_name"
+    docker compose "\${compose_args[@]}" up -d
+done
+EOF_SCRIPT
+
+    chmod 755 "$ETCPATH/$DOCKER_COMPOSE_RESTORE_SCRIPT"
+}
+
 function ensure_group_member() {
     local group_name="$1"
     local user_name="$2"
@@ -468,21 +657,68 @@ function ensure_group_member() {
 }
 
 function configure_docker() {
+    make_docker_storage_script
+    make_docker_profile_script
+    make_docker_compose_restore_script
+
     mkdir -p /etc/docker
     cat <<EOF_DOCKER > /etc/docker/daemon.json
 {
-  "data-root": "$DOCKER_DATA_ROOT"
+  "data-root": "$DOCKER_DATA_ROOT",
+  "storage-driver": "overlay2"
 }
 EOF_DOCKER
 
     mkdir -p /etc/systemd/system/docker.service.d
     cat <<EOF_DOCKER_OVERRIDE > /etc/systemd/system/docker.service.d/10-inauto.conf
 [Unit]
-After=MountHome.service
+After=MountHome.service DockerPersistentStorage.service
+Requires=DockerPersistentStorage.service
 
 [Service]
 ExecStartPre=/bin/mkdir -p $DOCKER_DATA_ROOT
 EOF_DOCKER_OVERRIDE
+
+    mkdir -p /etc/systemd/system/containerd.service.d
+    cat <<EOF_CONTAINERD_OVERRIDE > /etc/systemd/system/containerd.service.d/10-inauto.conf
+[Unit]
+After=DockerPersistentStorage.service
+Requires=DockerPersistentStorage.service
+
+[Service]
+ExecStartPre=/bin/mkdir -p $CONTAINERD_DATA_ROOT
+EOF_CONTAINERD_OVERRIDE
+
+    cat <<EOF_UNIT > /etc/systemd/system/DockerPersistentStorage.service
+[Unit]
+Description=Prepare persistent Docker and containerd storage
+After=MountHome.service
+Wants=MountHome.service
+Before=containerd.service docker.service
+
+[Service]
+Type=oneshot
+ExecStart=$ETCPATH/$DOCKER_STORAGE_SCRIPT
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF_UNIT
+
+    cat <<EOF_UNIT > /etc/systemd/system/DockerComposeRestore.service
+[Unit]
+Description=Restore Docker Compose projects from persistent storage
+After=docker.service network-online.target OnStartOneShot.service
+Wants=docker.service network-online.target OnStartOneShot.service
+
+[Service]
+Type=oneshot
+Environment=DOCKER_CONFIG=$DOCKER_SYSTEM_CONFIG
+ExecStart=$ETCPATH/$DOCKER_COMPOSE_RESTORE_SCRIPT
+
+[Install]
+WantedBy=multi-user.target
+EOF_UNIT
 
     # The live user is created by casper at boot, so keep docker-group membership by name.
     ensure_group_member docker "$AUTOLOGIN_USER"
