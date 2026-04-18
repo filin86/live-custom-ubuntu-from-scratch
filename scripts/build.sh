@@ -119,12 +119,44 @@ function load_config() {
 # Verify that necessary configuration values are set and they are valid
 function check_config() {
     local expected_config_version
-    expected_config_version="0.4"
+    expected_config_version="0.5"
 
     if [[ "$CONFIG_FILE_VERSION" != "$expected_config_version" ]]; then
-        >&2 echo "Invalid or old config version $CONFIG_FILE_VERSION, expected $expected_config_version. Please update your configuration file from the default."
+        >&2 echo "Invalid or old config version $CONFIG_FILE_VERSION, expected $expected_config_version. Please update your scripts/config.sh from scripts/default_config.sh."
         exit 1
     fi
+
+    case "${TARGET_DISTRO:-}" in
+        ubuntu|debian) ;;
+        *)
+            >&2 echo "ERROR: TARGET_DISTRO must be 'ubuntu' or 'debian' (got: '${TARGET_DISTRO:-<unset>}')"
+            exit 1
+            ;;
+    esac
+
+    if [[ ! -d "$SCRIPT_DIR/profiles/$TARGET_DISTRO" ]]; then
+        >&2 echo "ERROR: profile directory missing: $SCRIPT_DIR/profiles/$TARGET_DISTRO"
+        exit 1
+    fi
+}
+
+function load_profile() {
+    PROFILE_DIR="$SCRIPT_DIR/profiles/$TARGET_DISTRO"
+
+    # shellcheck source=/dev/null
+    . "$PROFILE_DIR/profile.env"
+    # shellcheck source=/dev/null
+    . "$PROFILE_DIR/hooks.sh"
+
+    TARGET_VERSION="${!VERSION_VAR_NAME}"
+    TARGET_MIRROR="${!MIRROR_VAR_NAME}"
+
+    if [[ -z "$TARGET_VERSION" || -z "$TARGET_MIRROR" ]]; then
+        >&2 echo "ERROR: profile variable '$VERSION_VAR_NAME' or '$MIRROR_VAR_NAME' is empty"
+        exit 1
+    fi
+
+    export PROFILE_DIR TARGET_VERSION TARGET_MIRROR LIVE_BOOT_DIR LIVE_SQUASHFS_NAME
 }
 
 function setup_host() {
@@ -387,6 +419,16 @@ function prechroot() {
         as_root install -m 0644 "$SCRIPT_DIR/config.sh" chroot/root/config.sh
     fi
 
+    # Install profile files inside chroot for chroot_build.sh to consume.
+    as_root install -d -m 0755 chroot/root/profile
+    as_root install -d -m 0755 chroot/root/profile/iso-layout
+    as_root install -m 0644 "$PROFILE_DIR/profile.env" chroot/root/profile/profile.env
+    as_root install -m 0644 "$PROFILE_DIR/hooks.sh" chroot/root/profile/hooks.sh
+    as_root install -m 0644 "$PROFILE_DIR/sources.list.template" chroot/root/profile/sources.list.template
+    as_root install -m 0644 "$PROFILE_DIR/live-packages.list" chroot/root/profile/live-packages.list
+    as_root install -m 0644 "$PROFILE_DIR/iso-layout/grub.cfg.template" chroot/root/profile/iso-layout/grub.cfg.template
+    as_root install -m 0644 "$PROFILE_DIR/iso-layout/isolinux.cfg.template" chroot/root/profile/iso-layout/isolinux.cfg.template
+
     if [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
         as_root install -D -m 0644 /etc/ssl/certs/ca-certificates.crt \
             chroot/usr/local/share/ca-certificates/inauto-host-ca.crt
@@ -446,6 +488,7 @@ function postchroot() {
     if [[ -f "chroot/root/config.sh" ]]; then
         as_root rm -f chroot/root/config.sh
     fi
+    as_root rm -rf chroot/root/profile
 
     chroot_exit_teardown
 
@@ -461,7 +504,7 @@ function build_iso() {
     as_root mv chroot/image .
 
     # compress rootfs
-    as_root mksquashfs chroot image/casper/filesystem.squashfs \
+    as_root mksquashfs chroot image/$LIVE_BOOT_DIR/$LIVE_SQUASHFS_NAME \
         -noappend -no-duplicates -no-recovery \
         -wildcards \
         -comp xz -b 1M -Xdict-size 100% \
@@ -473,7 +516,7 @@ function build_iso() {
         -e "swapfile"
 
     # write the filesystem.size
-    printf "%s" "$(as_root du -sx --block-size=1 chroot | cut -f1)" | as_root tee image/casper/filesystem.size
+    printf "%s" "$(as_root du -sx --block-size=1 chroot | cut -f1)" | as_root tee image/$LIVE_BOOT_DIR/filesystem.size
 
     pushd "$SCRIPT_DIR/image"
 
@@ -507,7 +550,7 @@ function build_iso() {
          "/EFI/boot/bootx64.efi=isolinux/bootx64.efi" \
          "/EFI/boot/mmx64.efi=isolinux/mmx64.efi" \
          "/EFI/boot/grubx64.efi=isolinux/grubx64.efi" \
-         "/EFI/ubuntu/grub.cfg=isolinux/grub.cfg" \
+         "/EFI/$TARGET_DISTRO/grub.cfg=isolinux/grub.cfg" \
          "/isolinux/bios.img=isolinux/bios.img" \
          "/isolinux/efiboot.img=isolinux/efiboot.img" \
          "."
@@ -522,6 +565,7 @@ cd $SCRIPT_DIR
 
 load_config
 check_config
+load_profile
 check_host
 
 # check number of args
