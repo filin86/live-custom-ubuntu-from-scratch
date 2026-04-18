@@ -7,7 +7,23 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 DOCKER_BIN="${DOCKER_BIN:-docker}"
 DOCKER_USE_SUDO="${DOCKER_USE_SUDO:-auto}"
-BUILDER_IMAGE="${BUILDER_IMAGE:-livecd-builder:local}"
+# Read TARGET_DISTRO from config or caller environment (before container starts).
+TARGET_DISTRO_FROM_CONFIG=$(
+    set +u
+    source "$REPO_ROOT/scripts/default_config.sh" 2>/dev/null || true
+    [[ -f "$REPO_ROOT/scripts/config.sh" ]] && source "$REPO_ROOT/scripts/config.sh" 2>/dev/null || true
+    echo "${TARGET_DISTRO:-ubuntu}"
+)
+TARGET_DISTRO="${TARGET_DISTRO:-$TARGET_DISTRO_FROM_CONFIG}"
+
+case "$TARGET_DISTRO" in
+    ubuntu) BASE_IMAGE_DEFAULT="ubuntu:24.04" ;;
+    debian) BASE_IMAGE_DEFAULT="debian:trixie" ;;
+    *) >&2 echo "ERROR: unknown TARGET_DISTRO='$TARGET_DISTRO'"; exit 1 ;;
+esac
+
+BASE_IMAGE="${BASE_IMAGE:-$BASE_IMAGE_DEFAULT}"
+BUILDER_IMAGE="${BUILDER_IMAGE:-livecd-builder-${TARGET_DISTRO}:local}"
 BUILDER_PLATFORM="${BUILDER_PLATFORM:-linux/amd64}"
 DOCKERFILE_PATH="${DOCKERFILE_PATH:-$REPO_ROOT/docker/Builder.Dockerfile}"
 REBUILD_BUILDER="${REBUILD_BUILDER:-0}"
@@ -16,7 +32,7 @@ CHOWN_OUTPUTS="${CHOWN_OUTPUTS:-1}"
 HOST_UID="${HOST_UID:-$(id -u)}"
 HOST_GID="${HOST_GID:-$(id -g)}"
 REPO_NAME="$(basename "$REPO_ROOT")"
-LIVECD_CHROOT_VOLUME="${LIVECD_CHROOT_VOLUME:-${REPO_NAME}-chroot}"
+LIVECD_CHROOT_VOLUME="${LIVECD_CHROOT_VOLUME:-${REPO_NAME}-chroot-${TARGET_DISTRO}}"
 TRIVY_CACHE_VOLUME="${TRIVY_CACHE_VOLUME:-${REPO_NAME}-trivy-cache}"
 DOCKER_BUILD_NETWORK="${DOCKER_BUILD_NETWORK:-}"
 DOCKER_RUN_NETWORK="${DOCKER_RUN_NETWORK:-}"
@@ -113,6 +129,8 @@ Environment overrides:
   DOCKER_RUN_NETWORK    Optional network mode for 'docker run' (for example: host)
   HOST_CA_BUNDLE       Optional CA bundle path copied into builder image
   CHOWN_OUTPUTS         Set to 0 to keep container-owned reports/ISO artifacts
+  BASE_IMAGE            Override base image for the builder (default depends on TARGET_DISTRO)
+  TARGET_DISTRO         ubuntu | debian — overrides config, selects builder image and chroot volume
 EOF
 }
 
@@ -196,6 +214,7 @@ if [[ "$REBUILD_BUILDER" == "1" ]] || ! "${DOCKER_CMD[@]}" image inspect "$BUILD
         --platform "$BUILDER_PLATFORM" \
         "${BUILD_NETWORK_ARGS[@]}" \
         "${BUILD_SECRET_ARGS[@]}" \
+        --build-arg BASE_IMAGE="$BASE_IMAGE" \
         -t "$BUILDER_IMAGE" \
         -f "$DOCKERFILE_PATH" \
         "$REPO_ROOT"
@@ -225,6 +244,7 @@ fi
     -e HOST_UID="$HOST_UID" \
     -e HOST_GID="$HOST_GID" \
     -e CHOWN_OUTPUTS="$CHOWN_OUTPUTS" \
+    -e TARGET_DISTRO="$TARGET_DISTRO" \
     -e TRIVY_CACHE_DIR=/var/lib/trivy \
     -v "$REPO_ROOT:/workspace" \
     -v "$LIVECD_CHROOT_VOLUME:/workspace/scripts/chroot" \
