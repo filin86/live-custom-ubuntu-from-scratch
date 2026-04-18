@@ -1,1 +1,16 @@
-# Placeholder. Populated in Phase 3.
+# Debian live-stack + GRUB signed chain.
+sudo
+live-boot
+live-config
+live-tools
+network-manager
+locales
+grub-common
+grub-pc-bin
+grub2-common
+grub-efi-amd64-bin
+shim-signed
+mtools
+openssh-server
+unzip
+binutils
