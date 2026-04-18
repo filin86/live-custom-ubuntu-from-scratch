@@ -1,49 +1,42 @@
-# syntax=docker/dockerfile:1.4
-FROM ubuntu:24.04
+# syntax=docker/dockerfile:1.7
+ARG BASE_IMAGE=ubuntu:24.04
+FROM ${BASE_IMAGE}
 
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG DEBIAN_FRONTEND=noninteractive
 
-ENV DEBIAN_FRONTEND=noninteractive
-ARG TRIVY_VERSION=latest
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        debootstrap \
+        squashfs-tools \
+        xorriso \
+        binutils \
+        zstd \
+        jq \
+        ca-certificates \
+        curl \
+        gnupg \
+        sudo \
+        debian-archive-keyring \
+        ubuntu-keyring \
+        wget \
+        unzip \
+        file \
+        gettext-base \
+    && install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL https://aquasecurity.github.io/trivy-repo/deb/public.key \
+        | gpg --dearmor -o /etc/apt/keyrings/trivy.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+        > /etc/apt/sources.list.d/trivy.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends trivy \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN --mount=type=secret,id=host_ca_bundle,target=/tmp/host-ca-bundle.crt,required=false \
-    if [[ -f /etc/apt/sources.list.d/ubuntu.sources ]]; then \
-        sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources; \
-    fi \
- && printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
-    > /etc/apt/apt.conf.d/80inauto-network-retries \
- && if [[ -s /tmp/host-ca-bundle.crt ]]; then \
-        install -D -m 0644 /tmp/host-ca-bundle.crt /etc/ssl/certs/ca-certificates.crt; \
-        printf 'Acquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";\n' \
-            > /etc/apt/apt.conf.d/81inauto-custom-ca; \
-    else \
-        printf 'Acquire::https::Verify-Peer "false";\nAcquire::https::Verify-Host "false";\n' \
-            > /etc/apt/apt.conf.d/81inauto-insecure-bootstrap; \
-    fi \
- && apt-get update && apt-get install -y \
-    ca-certificates \
-    curl \
-    lsb-release \
-    debootstrap \
-    squashfs-tools \
-    xorriso \
-    binutils \
-    zstd \
-    jq \
- && if [[ -s /tmp/host-ca-bundle.crt ]]; then \
-        install -D -m 0644 /tmp/host-ca-bundle.crt /usr/local/share/ca-certificates/inauto-host-ca.crt; \
-        update-ca-certificates; \
-    fi \
- && rm -f /etc/apt/apt.conf.d/81inauto-insecure-bootstrap \
- && curl -kfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-    | sh -s -- -b /usr/local/bin "${TRIVY_VERSION}" \
- && rm -rf /var/lib/apt/lists/*
+ARG HOST_CA_CERT_PATH=
+COPY ${HOST_CA_CERT_PATH:-/dev/null} /usr/local/share/ca-certificates/inauto-host-ca.crt
+RUN update-ca-certificates || true
 
-COPY docker/container-entrypoint.sh /usr/local/bin/livecd-container-entrypoint
-
-RUN chmod 755 /usr/local/bin/livecd-container-entrypoint
+COPY docker/container-entrypoint.sh /container-entrypoint.sh
+RUN chmod 0755 /container-entrypoint.sh
 
 WORKDIR /workspace
-
-ENTRYPOINT ["/usr/local/bin/livecd-container-entrypoint"]
+ENTRYPOINT ["/container-entrypoint.sh"]
 CMD ["./scripts/build.sh", "-"]
