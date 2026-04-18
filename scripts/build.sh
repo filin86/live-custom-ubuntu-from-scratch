@@ -156,7 +156,7 @@ function load_profile() {
         exit 1
     fi
 
-    export PROFILE_DIR TARGET_VERSION TARGET_MIRROR LIVE_BOOT_DIR LIVE_SQUASHFS_NAME
+    export PROFILE_DIR TARGET_VERSION TARGET_MIRROR LIVE_BOOT_DIR LIVE_SQUASHFS_NAME DEBOOTSTRAP_COMPONENTS
 }
 
 function setup_host() {
@@ -194,20 +194,22 @@ function debootstrap() {
             "${extractor_args[@]}" \
             --arch=amd64 \
             --variant=minbase \
+            --components="$DEBOOTSTRAP_COMPONENTS" \
             --include=ca-certificates \
-            "$TARGET_UBUNTU_VERSION" \
+            "$TARGET_VERSION" \
             chroot \
-            "$TARGET_UBUNTU_MIRROR"
+            "$TARGET_MIRROR"
     else
         "${ROOT_CMD[@]}" debootstrap \
             --verbose \
             "${extractor_args[@]}" \
             --arch=amd64 \
             --variant=minbase \
+            --components="$DEBOOTSTRAP_COMPONENTS" \
             --include=ca-certificates \
-            "$TARGET_UBUNTU_VERSION" \
+            "$TARGET_VERSION" \
             chroot \
-            "$TARGET_UBUNTU_MIRROR"
+            "$TARGET_MIRROR"
     fi
 }
 
@@ -309,8 +311,8 @@ function scan_vulnerabilities() {
 
     {
         echo "target_name=$TARGET_NAME"
-        echo "target_ubuntu_version=$TARGET_UBUNTU_VERSION"
-        echo "target_ubuntu_mirror=$TARGET_UBUNTU_MIRROR"
+        echo "target_version=$TARGET_VERSION"
+        echo "target_mirror=$TARGET_MIRROR"
         echo "generated_at_utc=$(TZ=UTC date -Iseconds)"
         echo "scan_timeout=$scan_timeout"
         echo "severity_filter=$severity_filter"
