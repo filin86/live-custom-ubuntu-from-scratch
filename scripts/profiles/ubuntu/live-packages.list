@@ -1,0 +1,16 @@
+# Ubuntu live-stack packages. Consumed by profile_install_live_stack hook.
+sudo
+casper
+network-manager
+locales
+grub-common
+grub-gfxpayload-lists
+grub-pc
+grub-pc-bin
+grub2-common
+grub-efi-amd64-signed
+shim-signed
+mtools
+openssh-server
+unzip
+binutils
