@@ -1,1 +1,30 @@
-# Placeholder. Populated in Phase 3.
+search --set=root --file /.disk/info
+
+insmod all_video
+
+set default="0"
+set timeout=1
+
+menuentry "Inautomatic Debian" {
+    linux /$LIVE_BOOT_DIR/vmlinuz boot=live config noprompt noeject toram quiet splash ---
+    initrd /$LIVE_BOOT_DIR/initrd.img
+}
+
+menuentry "Check disc for defects" {
+    linux /$LIVE_BOOT_DIR/vmlinuz boot=live integrity-check quiet splash ---
+    initrd /$LIVE_BOOT_DIR/initrd.img
+}
+
+menuentry "Test memory Memtest86+ (BIOS)" {
+    linux16 /install/memtest86+.bin
+}
+
+grub_platform
+if [ "$grub_platform" = "efi" ]; then
+menuentry "Test memory Memtest86+ (UEFI, long load time)" {
+    linux /install/memtest86+.efi
+}
+menuentry 'UEFI Firmware Settings' {
+    fwsetup
+}
+fi
