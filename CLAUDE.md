@@ -98,7 +98,7 @@ setup_host -> debootstrap -> prechroot
 
 ### Конфигурация: `config.sh` перекрывает `default_config.sh`
 
-`build.sh::load_config()` загружает `scripts/config.sh`, если файл существует; иначе падает на `scripts/default_config.sh`. **Версия конфига проверяется** (`CONFIG_FILE_VERSION`, сейчас `"0.4"`) — при подъёме обязательно обновлять и локальный `config.sh`.
+`build.sh::load_config()` загружает `scripts/config.sh`, если файл существует; иначе падает на `scripts/default_config.sh`. **Версия конфига проверяется** (`CONFIG_FILE_VERSION`, сейчас `"0.5"`) — при подъёме обязательно обновлять и локальный `config.sh`.
 
 Ключевые переменные конфигурации (определены в `default_config.sh`):
 - `TARGET_UBUNTU_VERSION` (например, `noble`), `TARGET_UBUNTU_MIRROR`, `TARGET_NAME`;
@@ -106,6 +106,12 @@ setup_host -> debootstrap -> prechroot
 - список устанавливаемых пакетов и хуки кастомизации.
 
 При модификации сборки **правьте `config.sh` (override)**, а не `default_config.sh`, если нужна локальная настройка, которая не должна попасть всем потребителям дефолтов.
+
+### Профили дистрибутивов
+
+Distro-specific логика изолирована в `scripts/profiles/<name>/` (`ubuntu/` и `debian/`). Каждый профиль содержит: `profile.env`, `sources.list.template`, `live-packages.list`, `hooks.sh` (4 функции: `profile_install_live_stack`, `profile_kernel_install`, `profile_write_image_marker`, `profile_write_boot_configs`), `iso-layout/{grub,isolinux}.cfg.template`. Общий код (`build.sh`, `chroot_build.sh`) distro-agnostic: читает профиль и дёргает хуки.
+
+Переключатель — `TARGET_DISTRO=ubuntu|debian` в `scripts/config.sh` или окружении. Под каждый дистрибутив собирается отдельный builder-образ `livecd-builder-${TARGET_DISTRO}:local` из одного `docker/Builder.Dockerfile` (`ARG BASE_IMAGE`).
 
 ### Артефакты и выходные файлы
 
