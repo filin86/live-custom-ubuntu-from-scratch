@@ -13,6 +13,13 @@ export TARGET_UBUNTU_VERSION="noble"
 # More mirrors see: https://launchpad.net/ubuntu/+archivemirrors
 export TARGET_UBUNTU_MIRROR="https://archive.ubuntu.com/ubuntu/"
 
+# Distro selector.
+export TARGET_DISTRO="${TARGET_DISTRO:-ubuntu}"
+
+# Debian parameters (active when TARGET_DISTRO=debian).
+export TARGET_DEBIAN_VERSION="trixie"
+export TARGET_DEBIAN_MIRROR="http://deb.debian.org/debian/"
+
 # The packaged version of the Linux kernel to install on target image.
 export TARGET_KERNEL_PACKAGE="linux-generic"
 
@@ -37,7 +44,7 @@ export TARGET_PACKAGE_REMOVE="
 
 # Used to version the configuration. If breaking changes occur, manual
 # updates to this file from the default may be necessary.
-export CONFIG_FILE_VERSION="0.4"
+export CONFIG_FILE_VERSION="0.5"
 
 HOMEPATH="/home/inauto"
 ETCPATH="/etc/inauto"
@@ -403,7 +410,7 @@ function install_docker_engine() {
         runc
 
     install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    curl -fsSL https://download.docker.com/linux/$DOCKER_APT_DISTRO/gpg -o /etc/apt/keyrings/docker.asc
     chmod a+r /etc/apt/keyrings/docker.asc
 
     docker_arch=$(dpkg --print-architecture)
@@ -411,7 +418,7 @@ function install_docker_engine() {
 
     cat <<EOF_DOCKER_APT > /etc/apt/sources.list.d/docker.sources
 Types: deb
-URIs: https://download.docker.com/linux/ubuntu
+URIs: https://download.docker.com/linux/$DOCKER_APT_DISTRO
 Suites: $docker_codename
 Components: stable
 Architectures: $docker_arch
