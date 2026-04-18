@@ -8,6 +8,41 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 
 CMD=(setup_host install_pkg customize_image custom_conf postpkginst build_image finish_up)
 
+# Profile is installed into chroot by build.sh::prechroot.
+PROFILE_DIR="/root/profile"
+if [[ ! -d "$PROFILE_DIR" ]]; then
+    >&2 echo "ERROR: $PROFILE_DIR missing inside chroot; build.sh::prechroot must copy it"
+    exit 1
+fi
+# shellcheck source=/dev/null
+. "$PROFILE_DIR/profile.env"
+# shellcheck source=/dev/null
+. "$PROFILE_DIR/hooks.sh"
+
+# Resolve target version/mirror from profile-indirected variable names.
+TARGET_VERSION="${!VERSION_VAR_NAME}"
+TARGET_MIRROR="${!MIRROR_VAR_NAME}"
+
+# Helper — apt-install from a text-file list (lines, # comments).
+function apt_install_list() {
+    local list_file="$1"
+    local -a pkgs=()
+    local line
+
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        line="${line//[[:space:]]/}"
+        [[ -n "$line" ]] && pkgs+=("$line")
+    done < "$list_file"
+
+    if (( ${#pkgs[@]} == 0 )); then
+        echo "No packages in $list_file"
+        return 0
+    fi
+
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${pkgs[@]}"
+}
+
 function help() {
     # if $1 is set, use $1 as headline message in help()
     if [ -z ${1+x} ]; then
@@ -56,28 +91,19 @@ function check_host() {
 function setup_host() {
     echo "=====> running setup_host ..."
 
-   cat <<EOF > /etc/apt/sources.list
-deb $TARGET_UBUNTU_MIRROR $TARGET_UBUNTU_VERSION main restricted universe multiverse
-deb-src $TARGET_UBUNTU_MIRROR $TARGET_UBUNTU_VERSION main restricted universe multiverse
-
-deb $TARGET_UBUNTU_MIRROR $TARGET_UBUNTU_VERSION-security main restricted universe multiverse
-deb-src $TARGET_UBUNTU_MIRROR $TARGET_UBUNTU_VERSION-security main restricted universe multiverse
-
-deb $TARGET_UBUNTU_MIRROR $TARGET_UBUNTU_VERSION-updates main restricted universe multiverse
-deb-src $TARGET_UBUNTU_MIRROR $TARGET_UBUNTU_VERSION-updates main restricted universe multiverse
-EOF
+    TARGET_MIRROR="$TARGET_MIRROR" TARGET_VERSION="$TARGET_VERSION" \
+        envsubst '$TARGET_MIRROR $TARGET_VERSION' \
+        < "$PROFILE_DIR/sources.list.template" \
+        > /etc/apt/sources.list
 
     echo "$TARGET_NAME" > /etc/hostname
 
-    # we need to install systemd first, to configure machine id
     apt-get update
     apt-get install -y libterm-readline-gnu-perl systemd-sysv
 
-    #configure machine id
     dbus-uuidgen > /etc/machine-id
     ln -fs /etc/machine-id /var/lib/dbus/machine-id
 
-    # don't understand why, but multiple sources indicate this
     dpkg-divert --local --rename --add /sbin/initctl
     ln -s /bin/true /sbin/initctl
 }
@@ -104,105 +130,19 @@ function install_pkg() {
 
     apt-get -y upgrade
 
-    # install live packages
-    apt-get install -y \
-        sudo \
-        casper \
-        network-manager \
-        locales \
-        grub-common \
-        grub-gfxpayload-lists \
-        grub-pc \
-        grub-pc-bin \
-        grub2-common \
-        grub-efi-amd64-signed \
-        shim-signed \
-        mtools \
-        openssh-server \
-        unzip \
-        binutils
-    
-    case $TARGET_UBUNTU_VERSION in
-        "focal" | "bionic")
-            apt-get install -y lupin-casper
-            ;;
-        *)
-            echo "Package lupin-casper is not needed. Skipping."
-            ;;
-    esac
-    
-    # install kernel
-    # Mirrors can be partially synchronized. Retry with several strategies and
-    # avoid hard failure on a single meta-package transaction.
-    local kernel_pkg
-    local concrete_generic
-    local concrete_virtual
-    kernel_pkg="${TARGET_KERNEL_PACKAGE:-linux-image-generic}"
+    # Install live-stack and GRUB packages from profile.
+    profile_install_live_stack
 
-    try_install_kernel_pkg() {
-        local pkg="$1"
-        apt-get install -y --no-install-recommends "$pkg" && return 0
-        apt-get install -y --no-install-recommends -t "$TARGET_UBUNTU_VERSION" "$pkg" && return 0
-        return 1
-    }
+    # Install kernel via profile-specific hook.
+    profile_kernel_install
 
-    apt-get update
-
-    if ! try_install_kernel_pkg "$kernel_pkg"; then
-        echo "WARNING: failed to install kernel package: $kernel_pkg"
-
-        if [[ "$kernel_pkg" != "linux-image-generic" ]]; then
-            echo "WARNING: retrying with linux-image-generic"
-            try_install_kernel_pkg linux-image-generic || true
-        fi
-
-        if ! dpkg -s linux-image-generic >/dev/null 2>&1 && [[ "$TARGET_UBUNTU_MIRROR" != "https://archive.ubuntu.com/ubuntu/" ]]; then
-            echo "WARNING: retrying kernel install from fallback mirror: archive.ubuntu.com"
-            cat <<EOF > /etc/apt/sources.list
-
-deb https://archive.ubuntu.com/ubuntu/ $TARGET_UBUNTU_VERSION main restricted universe multiverse
-deb https://archive.ubuntu.com/ubuntu/ $TARGET_UBUNTU_VERSION-security main restricted universe multiverse
-deb https://archive.ubuntu.com/ubuntu/ $TARGET_UBUNTU_VERSION-updates main restricted universe multiverse
-EOF
-            apt-get update
-            try_install_kernel_pkg linux-image-generic || true
-        fi
-
-        if ! dpkg -s linux-image-generic >/dev/null 2>&1; then
-            concrete_generic=$(apt-cache search '^linux-image-[0-9].*-generic$' | awk '{print $1}' | sort -Vr | head -n1 || true)
-            if [[ -n "$concrete_generic" ]]; then
-                echo "WARNING: retrying with concrete package: $concrete_generic"
-                try_install_kernel_pkg "$concrete_generic" || true
-            fi
-        fi
-
-        if ! ls /boot/vmlinuz-* >/dev/null 2>&1; then
-            concrete_virtual=$(apt-cache search '^linux-image-[0-9].*-virtual$' | awk '{print $1}' | sort -Vr | head -n1 || true)
-            if [[ -n "$concrete_virtual" ]]; then
-                echo "WARNING: retrying with concrete virtual package: $concrete_virtual"
-                try_install_kernel_pkg "$concrete_virtual" || true
-            else
-                echo "WARNING: retrying with linux-image-virtual"
-                try_install_kernel_pkg linux-image-virtual || true
-            fi
-        fi
-
-        if ! ls /boot/vmlinuz-* >/dev/null 2>&1; then
-            >&2 echo "ERROR: unable to install a bootable kernel package"
-            exit 1
-        fi
-    fi
-
-    # graphic installer - ubiquity
+    # graphic installer - ubiquity (intentionally disabled in this fork)
     #apt-get install -y \
     #    ubiquity \
     #    ubiquity-casper \
     #    ubiquity-frontend-gtk \
     #    ubiquity-slideshow-ubuntu \
     #    ubiquity-ubuntu-artwork
-
-    # Call into config function
-    
 }
 
 function postpkginst() {
@@ -220,7 +160,7 @@ function build_image() {
 
     rm -rf /image
 
-    mkdir -p /image/{casper,isolinux,install}
+    mkdir -p /image/{$LIVE_BOOT_DIR,isolinux,install}
 
     pushd /image
 
@@ -251,8 +191,8 @@ function build_image() {
         exit 1
     fi
 
-    cp "$kernel_src" casper/vmlinuz
-    cp "$initrd_src" casper/initrd
+    cp "$kernel_src" "$LIVE_BOOT_DIR/$LIVE_KERNEL_NAME"
+    cp "$initrd_src" "$LIVE_BOOT_DIR/$LIVE_INITRD_NAME"
 
     # memtest86
     wget --progress=dot https://memtest.org/download/v7.20/mt86plus_7.20.binaries.zip -O install/memtest86.zip
@@ -261,49 +201,16 @@ function build_image() {
     rm -f install/memtest86.zip
 
     # grub
-    touch ubuntu
-    cat <<EOF > isolinux/grub.cfg
-
-search --set=root --file /ubuntu
-
-insmod all_video
-
-set default="0"
-set timeout=1
-
-menuentry "Inautomatic Ubuntu" {
-    linux /casper/vmlinuz boot=casper systemd.mask=udisks2 nopersistent toram noprompt ---
-    initrd /casper/initrd
-}
-
-menuentry "Check disc for defects" {
-    linux /casper/vmlinuz boot=casper integrity-check quiet splash ---
-    initrd /casper/initrd
-}
-
-grub_platform
-if [ "\$grub_platform" = "efi" ]; then
-menuentry 'UEFI Firmware Settings' {
-    fwsetup
-}
-
-menuentry "Test memory Memtest86+ (UEFI)" {
-    linux /install/memtest86+.efi
-}
-else
-menuentry "Test memory Memtest86+ (BIOS)" {
-    linux16 /install/memtest86+.bin
-}
-fi
-EOF
+    profile_write_image_marker
+    profile_write_boot_configs
 
     # generate manifest
-    dpkg-query -W --showformat='${Package} ${Version}\n' | tee casper/filesystem.manifest
+    dpkg-query -W --showformat='${Package} ${Version}\n' | tee $LIVE_BOOT_DIR/filesystem.manifest
 
-    cp -v casper/filesystem.manifest casper/filesystem.manifest-desktop
+    cp -v $LIVE_BOOT_DIR/filesystem.manifest $LIVE_BOOT_DIR/filesystem.manifest-desktop
 
     for pkg in $TARGET_PACKAGE_REMOVE; do
-        sed -i "/$pkg/d" casper/filesystem.manifest-desktop
+        sed -i "/$pkg/d" $LIVE_BOOT_DIR/filesystem.manifest-desktop
     done
 
     # create diskdefines
