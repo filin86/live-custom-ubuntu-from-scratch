@@ -96,6 +96,26 @@
 > [!IMPORTANT]
 > Builder-окружение теперь переносимо между разными хост-платформами, но схема загрузки ISO в этом репозитории пока все еще жестко завязана на `amd64/x86_64`. Для полноценной сборки non-amd64 ISO понадобятся дополнительные изменения в загрузчиках и пакетах внутри build-скриптов.
 
+### Сборка Debian-варианта
+
+Проект поддерживает два дистрибутива: Ubuntu (по умолчанию) и Debian. Переключение — через `TARGET_DISTRO` в `scripts/config.sh` либо переменной окружения:
+
+```shell
+# Однократно
+TARGET_DISTRO=debian ./scripts/build-in-docker.sh -
+
+# Через config.sh
+echo 'export TARGET_DISTRO="debian"' >> scripts/config.sh
+./scripts/build-in-docker.sh -
+```
+
+Поддерживаемые релизы:
+
+* **Ubuntu:** `noble` (24.04 LTS, по умолчанию), `questing` (25.10), `26.04` (после релиза 2026-04-23).
+* **Debian:** `trixie` (13, по умолчанию), `forky` (14, testing), `sid` (unstable).
+
+Под каждый дистрибутив собирается свой builder-образ (`livecd-builder-ubuntu:local` / `livecd-builder-debian:local`) и отдельный chroot-volume (`<repo>-chroot-<distro>`). Первая сборка под новый дистрибутив длиннее (пересборка builder-а + debootstrap с нуля).
+
 ## Термины
 
 * `build system` - компьютерная среда, в которой запускаются скрипты сборки, генерирующие ISO.
