@@ -4,7 +4,25 @@
       "mcp__plugin_context-mode_context-mode__ctx_batch_execute",
       "mcp__plugin_context-mode_context-mode__ctx_search",
       "mcp__plugin_context-mode_context-mode__ctx_fetch_and_index",
-      "Bash(git *)"
+      "Bash(git *)",
+      "mcp__plugin_context-mode_context-mode__ctx_execute_file",
+      "Bash(grep -vE '^\\\\s*\\(#|$\\)' scripts/common-packages.list)",
+      "mcp__plugin_context-mode_context-mode__ctx_execute",
+      "Bash(bash -n scripts/profiles/ubuntu/profile.env)",
+      "Bash(bash -n scripts/profiles/ubuntu/hooks.sh)",
+      "Bash(bash -n scripts/profiles/debian/profile.env)",
+      "Bash(bash -n scripts/profiles/debian/hooks.sh)",
+      "Bash(chmod +x *)",
+      "Bash(bash -n scripts/default_config.sh)",
+      "Bash(bash -n scripts/config.sh)",
+      "Bash(bash -n D:/dev/inautomatic/src/staff/live-custom-ubuntu-from-scratch/scripts/build.sh)",
+      "Bash(bash -n /d/dev/inautomatic/src/staff/live-custom-ubuntu-from-scratch/scripts/build.sh)",
+      "Bash(bash -n \"D:/dev/inautomatic/src/staff/live-custom-ubuntu-from-scratch/scripts/chroot_build.sh\")",
+      "Bash(echo \"exit=$?\")",
+      "Bash(bash -n D:/dev/inautomatic/src/staff/live-custom-ubuntu-from-scratch/scripts/build-in-docker.sh)",
+      "WebSearch",
+      "Bash(./generate-dev-keys.sh)",
+      "Bash(grep -vE '^[\\\\.+]+$')"
     ]
   }
 }
