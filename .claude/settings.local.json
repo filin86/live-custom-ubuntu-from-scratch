@@ -22,7 +22,19 @@
       "Bash(bash -n D:/dev/inautomatic/src/staff/live-custom-ubuntu-from-scratch/scripts/build-in-docker.sh)",
       "WebSearch",
       "Bash(./generate-dev-keys.sh)",
-      "Bash(grep -vE '^[\\\\.+]+$')"
+      "Bash(grep -vE '^[\\\\.+]+$')",
+      "Bash(bash -n scripts/build.sh)",
+      "Bash(bash -n scripts/targets/rauc/partition-layout/pc-efi.sgdisk)",
+      "Bash(sed -e 's|@DISTRO@|ubuntu|g' -e 's|@ARCH@|amd64|g' -e 's|@PLATFORM@|pc-efi|g' scripts/profiles/ubuntu/rauc/system-efi.conf.template)",
+      "Read(//tmp/**)",
+      "Bash(bash -n scripts/targets/rauc/installer/install-to-disk.sh)",
+      "Bash(bash -n scripts/targets/rauc/build-installer-image.sh)",
+      "Bash(cp scripts/profiles/ubuntu/rauc/scripts/panel-check-updates.sh scripts/profiles/debian/rauc/scripts/)",
+      "Bash(cp scripts/profiles/ubuntu/rauc/systemd-units/panel-check-updates.service scripts/profiles/debian/rauc/systemd-units/)",
+      "Bash(cp scripts/profiles/ubuntu/rauc/systemd-units/panel-check-updates.timer scripts/profiles/debian/rauc/systemd-units/)",
+      "Bash(bash -n scripts/profiles/ubuntu/rauc/scripts/panel-check-updates.sh)",
+      "Bash(bash -n scripts/targets/rauc/installer/backup-restore-home.sh)",
+      "Bash(bash -n scripts/build-in-docker.sh)"
     ]
   }
 }

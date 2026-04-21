@@ -27,6 +27,31 @@ export TARGET_KERNEL_PACKAGE="linux-generic"
 # the volume id, and the hostname of the live environment are set from this name.
 export TARGET_NAME="inauto-ubuntu-livecd"
 
+# Build target selection.
+# TARGET_FORMAT=iso  — classic Live ISO (default, current workflow).
+# TARGET_FORMAT=rauc — immutable firmware via RAUC; see docs/superpowers/specs/2026-04-20-immutable-panel-firmware-design.md.
+export TARGET_FORMAT="${TARGET_FORMAT:-iso}"
+
+# Hardware platform for the rauc target (ignored when TARGET_FORMAT=iso).
+# Supported for MVP: pc-efi (x86_64/amd64 UEFI).
+export TARGET_PLATFORM="${TARGET_PLATFORM:-pc-efi}"
+
+# Target CPU architecture (informational).
+export TARGET_ARCH="${TARGET_ARCH:-amd64}"
+
+# Immutable firmware bundle version (rauc target only).
+# Must be provided explicitly for release builds; CI derives it from the git tag.
+# Production versions must match ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$.
+export RAUC_BUNDLE_VERSION="${RAUC_BUNDLE_VERSION:-}"
+
+# Size of the tmpfs overlay upper layer for the immutable RAUC rootfs.
+export INAUTO_OVERLAY_SIZE="${INAUTO_OVERLAY_SIZE:-2G}"
+
+# Conventional paths inside /home/inauto used by site integration hooks.
+export INAUTO_SITE_CONFIG_DIR="${INAUTO_SITE_CONFIG_DIR:-/home/inauto/config}"
+export INAUTO_AUTOSTART_SCRIPT="${INAUTO_AUTOSTART_SCRIPT:-/home/inauto/on_login}"
+export INAUTO_JOURNAL_DIR="${INAUTO_JOURNAL_DIR:-/home/inauto/log/journal}"
+
 # The text label shown in GRUB for booting into the live environment
 export GRUB_LIVEBOOT_LABEL="Inautomatic LiveCD"
 
@@ -44,7 +69,7 @@ export TARGET_PACKAGE_REMOVE="
 
 # Used to version the configuration. If breaking changes occur, manual
 # updates to this file from the default may be necessary.
-export CONFIG_FILE_VERSION="0.5"
+export CONFIG_FILE_VERSION="0.6"
 
 HOMEPATH="/home/inauto"
 ETCPATH="/etc/inauto"
@@ -106,6 +131,8 @@ function custom_conf() {
 
     exec_on_start
     journald_conf
+
+    configure_rauc_target
 
     systemctl daemon-reload
     systemctl enable \
@@ -290,6 +317,8 @@ function customize_image() {
         e2fsprogs
 
     install_docker_engine
+
+    install_rauc_packages
 }
 
 function net_config() {
@@ -447,6 +476,18 @@ EOF_DOCKER_COMPOSE
 }
 
 function make_docker_storage_script() {
+    if rauc_enabled; then
+        make_docker_storage_script_rauc
+    else
+        make_docker_storage_script_iso
+    fi
+
+    chmod 755 "$ETCPATH/$DOCKER_STORAGE_SCRIPT"
+}
+
+# ISO-вариант: историческое поведение.
+# Персистентное хранилище — loopback ext4 файл под /home/inauto/staff/docker.
+function make_docker_storage_script_iso() {
     cat <<EOF_SCRIPT > "$ETCPATH/$DOCKER_STORAGE_SCRIPT"
 #!/bin/bash
 set -euo pipefail
@@ -517,8 +558,57 @@ fi
 log "mounted persistent Docker storage at \$DOCKER_ROOT"
 log "mounted persistent containerd storage at \$CONTAINERD_ROOT"
 EOF_SCRIPT
+}
 
-    chmod 755 "$ETCPATH/$DOCKER_STORAGE_SCRIPT"
+# RAUC-вариант: container-store — выделенный GPT-раздел
+# /dev/disk/by-partlabel/container-store, примонтированный из initramfs
+# в /var/lib/inauto/container-store. Bind-mounts на /var/lib/docker и
+# /var/lib/containerd также сделаны в initramfs (scripts/local-bottom/panel-boot).
+# Этот скрипт — только валидация и идемпотентный ensure subdirs/config.
+# Никаких silent-fallback в ephemeral storage: если layout неправильный — fail.
+function make_docker_storage_script_rauc() {
+    cat <<EOF_SCRIPT > "$ETCPATH/$DOCKER_STORAGE_SCRIPT"
+#!/bin/bash
+set -euo pipefail
+
+CONTAINER_STORE_MOUNT="$DOCKER_STORAGE_MOUNT"
+DOCKER_ROOT="$DOCKER_DATA_ROOT"
+CONTAINERD_ROOT="$CONTAINERD_DATA_ROOT"
+DOCKER_SYSTEM_CONFIG="$DOCKER_SYSTEM_CONFIG"
+CONTAINER_STORE_DEVICE="/dev/disk/by-partlabel/container-store"
+
+log() {
+    echo "[docker-storage] \$*"
+}
+
+fail() {
+    echo "[docker-storage] ERROR: \$*" >&2
+    exit 1
+}
+
+ensure_system_config() {
+    mkdir -p "\$DOCKER_SYSTEM_CONFIG"
+    chmod 700 "\$DOCKER_SYSTEM_CONFIG"
+}
+
+[[ -b "\$CONTAINER_STORE_DEVICE" ]] \
+    || fail "раздел \$CONTAINER_STORE_DEVICE отсутствует; immutable layout не активен"
+
+mountpoint -q "\$CONTAINER_STORE_MOUNT" \
+    || fail "\$CONTAINER_STORE_MOUNT не смонтирован (должно быть сделано initramfs)"
+
+mkdir -p "\$CONTAINER_STORE_MOUNT/docker" "\$CONTAINER_STORE_MOUNT/containerd"
+
+ensure_system_config
+
+mountpoint -q "\$DOCKER_ROOT" \
+    || fail "\$DOCKER_ROOT не является bind-mount из container-store"
+
+mountpoint -q "\$CONTAINERD_ROOT" \
+    || fail "\$CONTAINERD_ROOT не является bind-mount из container-store"
+
+log "container-store ok: \$CONTAINER_STORE_MOUNT -> \$DOCKER_ROOT, \$CONTAINERD_ROOT"
+EOF_SCRIPT
 }
 
 function make_docker_profile_script() {
@@ -696,7 +786,25 @@ Requires=DockerPersistentStorage.service
 ExecStartPre=/bin/mkdir -p $CONTAINERD_DATA_ROOT
 EOF_CONTAINERD_OVERRIDE
 
-    cat <<EOF_UNIT > /etc/systemd/system/DockerPersistentStorage.service
+    if rauc_enabled; then
+        cat <<EOF_UNIT > /etc/systemd/system/DockerPersistentStorage.service
+[Unit]
+Description=Validate persistent container-store mounts (RAUC immutable target)
+After=local-fs.target MountHome.service
+Requires=MountHome.service
+RequiresMountsFor=/var/lib/inauto/container-store /var/lib/docker /var/lib/containerd
+Before=containerd.service docker.service
+
+[Service]
+Type=oneshot
+ExecStart=$ETCPATH/$DOCKER_STORAGE_SCRIPT
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF_UNIT
+    else
+        cat <<EOF_UNIT > /etc/systemd/system/DockerPersistentStorage.service
 [Unit]
 Description=Prepare persistent Docker and containerd storage
 After=MountHome.service
@@ -711,6 +819,7 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF_UNIT
+    fi
 
     cat <<EOF_UNIT > /etc/systemd/system/DockerComposeRestore.service
 [Unit]
@@ -732,6 +841,19 @@ EOF_UNIT
 }
 
 function service_mounthome() {
+    if rauc_enabled; then
+        service_mounthome_rauc
+    else
+        service_mounthome_iso
+    fi
+
+    chmod 644 /etc/systemd/system/MountHome.service
+}
+
+# ISO-вариант: историческое поведение.
+# Скрипт find-and-mount-home.sh сканирует подключённые устройства по .inautolock
+# и монтирует найденное в /home/inauto.
+function service_mounthome_iso() {
     cat <<EOF_UNIT > /etc/systemd/system/MountHome.service
 [Unit]
 Description=Find and mount device with .inautolock
@@ -745,8 +867,32 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF_UNIT
+}
 
-    chmod 644 /etc/systemd/system/MountHome.service
+# RAUC-вариант: /home/inauto уже подмонтирован initramfs-скриптом
+# (scripts/local-bottom/panel-boot + inauto-data раздел).
+# Этот unit только проверяет факт mountpoint и является dependency-точкой
+# для OnStart*/DockerComposeRestore. Если /home/inauto не смонтирован —
+# service падает, остальная immutable-цепочка не стартует.
+#
+# find-and-mount-home.sh остаётся установленным (make_find_flash_script),
+# но только для ручного импорта/service engineering, не в normal boot.
+function service_mounthome_rauc() {
+    cat <<EOF_UNIT > /etc/systemd/system/MountHome.service
+[Unit]
+Description=Verify /home/inauto is mounted from the immutable initramfs
+After=local-fs.target
+DefaultDependencies=no
+RequiresMountsFor=/home/inauto
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/mountpoint -q /home/inauto
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF_UNIT
 }
 
 function service_onstartbeforelogin() {
@@ -897,4 +1043,196 @@ function disable_automount() {
 
 function enable_on_screen_kbd() {
     apt-get install -y onboard
+}
+
+# ============================================================================
+# RAUC immutable firmware target.
+# Активируется, когда TARGET_FORMAT=rauc. Для TARGET_FORMAT=iso функции
+# превращаются в no-op, поэтому классический ISO-путь остаётся без изменений.
+# ============================================================================
+
+function rauc_enabled() {
+    [[ "${TARGET_FORMAT:-iso}" == "rauc" ]]
+}
+
+# Устанавливает пакеты, нужные внутри rootfs при RAUC target'е.
+function install_rauc_packages() {
+    if ! rauc_enabled; then
+        return 0
+    fi
+
+    echo "[rauc] устанавливаю пакеты RAUC target'а"
+    apt-get install -y --no-install-recommends \
+        rauc \
+        jq \
+        curl \
+        efibootmgr \
+        openssh-server
+}
+
+# Рендерит /etc/rauc/system.conf из платформо-специфичного шаблона.
+function render_rauc_system_conf() {
+    local platform="${TARGET_PLATFORM:-}"
+    local distro="${TARGET_DISTRO:-}"
+    local arch="${TARGET_ARCH:-}"
+    local template
+
+    if [[ -z "$distro" || -z "$arch" || -z "$platform" ]]; then
+        echo "[rauc] ERROR: TARGET_DISTRO/TARGET_ARCH/TARGET_PLATFORM обязательны для RAUC target'а" >&2
+        exit 1
+    fi
+
+    case "$platform" in
+        pc-efi)
+            template="/root/profile/rauc/system-efi.conf.template"
+            ;;
+        *-uboot)
+            template="/root/profile/rauc/system-uboot.conf.template"
+            ;;
+        *)
+            echo "[rauc] ERROR: неизвестный TARGET_PLATFORM='$platform' (ожидается pc-efi или <board>-uboot)" >&2
+            exit 1
+            ;;
+    esac
+
+    if [[ ! -f "$template" ]]; then
+        echo "[rauc] ERROR: шаблон system.conf не найден: $template" >&2
+        exit 1
+    fi
+
+    install -d -m 0755 /etc/rauc
+    sed \
+        -e "s|@DISTRO@|$distro|g" \
+        -e "s|@ARCH@|$arch|g" \
+        -e "s|@PLATFORM@|$platform|g" \
+        "$template" > /etc/rauc/system.conf
+    chmod 0644 /etc/rauc/system.conf
+    echo "[rauc] /etc/rauc/system.conf отрендерен из $template"
+}
+
+# Копирует keyring, подготовленный хостом (build.sh::prechroot).
+function install_rauc_keyring() {
+    local src="/root/rauc-keyring.pem"
+
+    if [[ ! -f "$src" ]]; then
+        echo "[rauc] ERROR: keyring не найден: $src. build.sh::prechroot должен его скопировать." >&2
+        exit 1
+    fi
+
+    install -D -m 0644 "$src" /etc/rauc/keyring.pem
+    echo "[rauc] /etc/rauc/keyring.pem установлен"
+}
+
+# Пишет /etc/inauto/firmware-version с версией bundle'а.
+# Для dev-сборок (пустой RAUC_BUNDLE_VERSION) — placeholder с маркером dev.
+function write_firmware_version_file() {
+    local version="${RAUC_BUNDLE_VERSION:-}"
+
+    if [[ -z "$version" ]]; then
+        version="dev.unknown"
+        echo "[rauc] WARNING: RAUC_BUNDLE_VERSION не задан; записан placeholder '$version'. Не публиковать такую сборку." >&2
+    fi
+
+    install -d -m 0755 /etc/inauto
+    printf '%s\n' "$version" > /etc/inauto/firmware-version
+    chmod 0644 /etc/inauto/firmware-version
+    echo "[rauc] /etc/inauto/firmware-version = $version"
+}
+
+# Устанавливает initramfs-hook + local-bottom boot script + panel-init-persist-paths
+# и пересобирает initramfs. Должен запускаться уже после установки ядра.
+function install_rauc_initramfs() {
+    local hook_src="/root/profile/rauc/initramfs-hooks/panel-boot"
+    local script_src="/root/profile/rauc/initramfs-scripts/panel-boot"
+    local persist_src="/root/profile/rauc/scripts/init-persist-paths.sh"
+
+    if [[ ! -f "$hook_src" || ! -f "$script_src" || ! -f "$persist_src" ]]; then
+        echo "[rauc] ERROR: отсутствуют initramfs-артефакты профиля (hook/script/init-persist-paths)" >&2
+        exit 1
+    fi
+
+    install -D -m 0755 "$persist_src" /usr/local/sbin/panel-init-persist-paths
+    install -D -m 0755 "$hook_src"    /etc/initramfs-tools/hooks/panel-boot
+    install -D -m 0755 "$script_src"  /etc/initramfs-tools/scripts/local-bottom/panel-boot
+
+    if compgen -G "/boot/vmlinuz-*" >/dev/null; then
+        echo "[rauc] пересобираю initramfs через update-initramfs -u -k all"
+        update-initramfs -u -k all
+    else
+        echo "[rauc] WARNING: ядро не установлено; initramfs сгенерируется при установке kernel-пакета" >&2
+    fi
+}
+
+# Устанавливает update-agent (panel-check-updates.sh + timer/service).
+# Агент опрашивает update server, ставит новые bundle'ы, шлёт heartbeat.
+function install_rauc_update_agent() {
+    local agent_src="/root/profile/rauc/scripts/panel-check-updates.sh"
+    local service_src="/root/profile/rauc/systemd-units/panel-check-updates.service"
+    local timer_src="/root/profile/rauc/systemd-units/panel-check-updates.timer"
+
+    for f in "$agent_src" "$service_src" "$timer_src"; do
+        [[ -f "$f" ]] || { echo "[rauc] ERROR: update-agent артефакт отсутствует: $f" >&2; exit 1; }
+    done
+
+    install -D -m 0755 "$agent_src"   /usr/local/bin/panel-check-updates.sh
+    install -D -m 0644 "$service_src" /etc/systemd/system/panel-check-updates.service
+    install -D -m 0644 "$timer_src"   /etc/systemd/system/panel-check-updates.timer
+
+    systemctl enable panel-check-updates.timer
+    echo "[rauc] panel-check-updates.timer включён"
+}
+
+# Конфигурирует systemd watchdog для production rollout'ов.
+# Kernel panic timeout уже в kernel cmdline через system.conf.template (panic=30).
+# systemd следит за userspace зависаниями через /dev/watchdog (если есть).
+function install_rauc_watchdog() {
+    install -d -m 0755 /etc/systemd/system.conf.d
+    cat > /etc/systemd/system.conf.d/10-inauto-watchdog.conf <<'EOF_WD'
+[Manager]
+# Если ядро предоставляет /dev/watchdog (Intel iTCO, i6300esb в QEMU и т.п.),
+# systemd будет пинать его каждые RuntimeWatchdogSec/2. Стоп-пинг = hard reboot.
+RuntimeWatchdogSec=60s
+# Сколько ждать graceful shutdown до принудительной перезагрузки.
+RebootWatchdogSec=5min
+# Защита от долгих kexec-переходов (если понадобятся).
+KExecWatchdogSec=10min
+EOF_WD
+
+    chmod 0644 /etc/systemd/system.conf.d/10-inauto-watchdog.conf
+    echo "[rauc] systemd watchdog настроен (RuntimeWatchdogSec=60s)"
+}
+
+# Устанавливает panel-healthcheck.sh + rauc-mark-boot-good.service.
+# Только для RAUC builds — unit опирается на RAUC check-style MountHome.service
+# (см. service_mounthome_rauc), иначе rollback-цепочка не работает.
+function install_rauc_mark_good() {
+    local hc_src="/root/profile/rauc/scripts/panel-healthcheck.sh"
+    local unit_src="/root/profile/rauc/systemd-units/rauc-mark-boot-good.service"
+
+    [[ -f "$hc_src" ]]   || { echo "[rauc] ERROR: panel-healthcheck.sh отсутствует: $hc_src" >&2; exit 1; }
+    [[ -f "$unit_src" ]] || { echo "[rauc] ERROR: rauc-mark-boot-good.service отсутствует: $unit_src" >&2; exit 1; }
+
+    install -D -m 0755 "$hc_src"   /usr/local/bin/panel-healthcheck.sh
+    install -D -m 0644 "$unit_src" /etc/systemd/system/rauc-mark-boot-good.service
+
+    systemctl enable rauc-mark-boot-good.service
+    echo "[rauc] rauc-mark-boot-good.service включён"
+}
+
+# Полная настройка RAUC target'а. Вызывается из custom_conf().
+# No-op для TARGET_FORMAT=iso.
+function configure_rauc_target() {
+    if ! rauc_enabled; then
+        return 0
+    fi
+
+    echo "[rauc] настройка RAUC target'а начата"
+    render_rauc_system_conf
+    install_rauc_keyring
+    install_rauc_initramfs
+    install_rauc_mark_good
+    install_rauc_watchdog
+    install_rauc_update_agent
+    write_firmware_version_file
+    echo "[rauc] настройка RAUC target'а завершена"
 }

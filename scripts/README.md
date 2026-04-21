@@ -29,6 +29,7 @@
 
 - использует существующие этапы `build.sh`
 - включает `debootstrap`, `xorriso`, `mksquashfs`, `jq` и `trivy` прямо в builder-образ
+- для RAUC-target дополнительно ставит `rauc`, `dosfstools`, `mtools`, `gdisk`, `parted`, `kmod`, `initramfs-tools`, `efibootmgr`, `openssl` (и опционально `u-boot-tools` для планшетных сборок)
 - по умолчанию хранит тяжелое дерево `scripts/chroot` в именованном Docker volume
 - возвращает итоговые ISO-артефакты и отчеты обратно в workspace репозитория
 
@@ -118,6 +119,26 @@ BUILDER_PLATFORM=linux/amd64 ./build-in-docker.sh -
 ## Как обновлять конфигурацию
 
 Файл конфигурации версионируется через переменную `CONFIG_FILE_VERSION`. Если в `default_config.sh` меняется формат конфигурации, это значение увеличивается. После этого `config.sh` нужно вручную обновить на основе нового `default_config.sh`, чтобы новые или измененные переменные получили нужные значения. После завершения такого обновления значение `CONFIG_FILE_VERSION` в `config.sh` должно совпадать с версией в файле по умолчанию, иначе сборка не запустится.
+
+## Immutable firmware target (RAUC)
+
+С версии конфигурации `0.6` добавлена альтернативная цель сборки — immutable firmware для operator-панелей через RAUC. ISO-путь (`TARGET_FORMAT=iso`) остаётся дефолтным и не меняется.
+
+Новый путь активируется переменной окружения:
+
+```console
+TARGET_FORMAT=rauc TARGET_PLATFORM=pc-efi ./build-in-docker.sh -
+```
+
+После фаз 0–4 включительно доступна полная сборка `.raucb` bundle'а: `build_iso` останавливается после `mksquashfs` при `TARGET_FORMAT=rauc`, затем отдельный stage `build_rauc_bundle` собирает `efi.vfat` (kernel + initrd) и подписывает bundle ключами из `RAUC_SIGNING_CERT`/`RAUC_SIGNING_KEY` (по умолчанию dev-ключи из `pki/`). Готовый артефакт лежит в `out/inauto-panel-<distro>-<arch>-pc-efi-<version>.raucb`.
+
+Ключевые RAUC-переменные (см. `default_config.sh`):
+
+- `TARGET_PLATFORM=pc-efi` — UEFI PC (MVP); `<board>-uboot` — планшет.
+- `TARGET_ARCH=amd64` — информационно.
+- `RAUC_BUNDLE_VERSION` — обязательный явный вход для релизных сборок; production-версии валидируются regex `^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$`.
+- `INAUTO_OVERLAY_SIZE=2G` — размер tmpfs overlay upper для immutable rootfs.
+- `INAUTO_SITE_CONFIG_DIR`, `INAUTO_AUTOSTART_SCRIPT`, `INAUTO_JOURNAL_DIR` — пути внутри `/home/inauto`.
 
 ## Этап отчета об уязвимостях
 

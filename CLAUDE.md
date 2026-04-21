@@ -98,7 +98,7 @@ setup_host -> debootstrap -> prechroot
 
 ### Конфигурация: `config.sh` перекрывает `default_config.sh`
 
-`build.sh::load_config()` загружает `scripts/config.sh`, если файл существует; иначе падает на `scripts/default_config.sh`. **Версия конфига проверяется** (`CONFIG_FILE_VERSION`, сейчас `"0.5"`) — при подъёме обязательно обновлять и локальный `config.sh`.
+`build.sh::load_config()` загружает `scripts/config.sh`, если файл существует; иначе падает на `scripts/default_config.sh`. **Версия конфига проверяется** (`CONFIG_FILE_VERSION`, сейчас `"0.6"`) — при подъёме обязательно обновлять и локальный `config.sh`.
 
 Ключевые переменные конфигурации (определены в `default_config.sh`):
 - `TARGET_UBUNTU_VERSION` (например, `noble`), `TARGET_UBUNTU_MIRROR`, `TARGET_NAME`;
@@ -106,6 +106,23 @@ setup_host -> debootstrap -> prechroot
 - список устанавливаемых пакетов и хуки кастомизации.
 
 При модификации сборки **правьте `config.sh` (override)**, а не `default_config.sh`, если нужна локальная настройка, которая не должна попасть всем потребителям дефолтов.
+
+### Цели сборки: `TARGET_FORMAT`
+
+С версии конфига `0.6` сборка параметризуется новой переменной `TARGET_FORMAT`:
+
+- `TARGET_FORMAT=iso` (по умолчанию) — классический Live ISO, текущий workflow без изменений.
+- `TARGET_FORMAT=rauc` — immutable firmware для operator-панелей через RAUC (A/B обновления, SquashFS rootfs, tmpfs overlay). Детали в `docs/superpowers/specs/2026-04-20-immutable-panel-firmware-design.md`, план реализации в `docs/superpowers/plans/2026-04-20-immutable-panel-firmware.md`.
+
+Сопутствующие переменные при `TARGET_FORMAT=rauc`:
+
+- `TARGET_PLATFORM` (`pc-efi` для UEFI PC в MVP; `<board>-uboot` для планшетов после идентификации SoC/BSP);
+- `TARGET_ARCH` (информационно; для MVP — `amd64`);
+- `RAUC_BUNDLE_VERSION` — обязательный явный вход для релизных сборок (из git tag `vYYYY.MM.DD.N`); production-версии валидируются regex `^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$`. Дефолт не задаётся намеренно — silent wall-clock versioning запрещён;
+- `INAUTO_OVERLAY_SIZE` (размер tmpfs overlay upper, по умолчанию `2G`);
+- `INAUTO_SITE_CONFIG_DIR`, `INAUTO_AUTOSTART_SCRIPT`, `INAUTO_JOURNAL_DIR` — site-интеграционные пути внутри `/home/inauto`.
+
+`build.sh::check_config()` валидирует значения `TARGET_FORMAT` и `TARGET_PLATFORM` при старте.
 
 ### Профили дистрибутивов
 

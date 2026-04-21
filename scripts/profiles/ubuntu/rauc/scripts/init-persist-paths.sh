@@ -1,0 +1,106 @@
+#!/bin/sh
+# Инициализирует /persist и накладывает bind-mount'ы persistent paths на overlay-rootfs.
+# Запускается из initramfs (local-bottom/panel-boot) после того, как:
+#  - /persist примонтирован (ext4, RW);
+#  - /lower примонтирован (squashfs rootfs текущего slot'а, RO);
+#  - /overlay смонтирован поверх lower+tmpfs.
+#
+# Аргументы:
+#   $1  PERSIST_ROOT (например /run/panel/persist)
+#   $2  LOWER_ROOT   (например /run/panel/lower)
+#   $3  OVERLAY_ROOT (например /run/panel/overlay)
+#
+# Список persistent-путей должен совпадать со spec'ом
+# (docs/superpowers/specs/2026-04-20-immutable-panel-firmware-design.md, раздел "Persistent paths").
+
+set -eu
+
+PERSIST_ROOT="${1:?panel-init-persist-paths: PERSIST_ROOT не задан}"
+LOWER_ROOT="${2:?panel-init-persist-paths: LOWER_ROOT не задан}"
+OVERLAY_ROOT="${3:?panel-init-persist-paths: OVERLAY_ROOT не задан}"
+
+log() {
+    printf '[panel-init-persist-paths] %s\n' "$*"
+}
+
+# Маркер "dir" — ожидаем директорию, "file" — файл.
+# Формат: "<kind>:<relative-path>".
+PERSIST_ENTRIES="
+file:etc/machine-id
+file:etc/hostname
+dir:etc/ssh
+file:etc/NetworkManager/NetworkManager.conf
+dir:etc/NetworkManager/system-connections
+file:etc/inauto/serial.txt
+file:etc/inauto/channel
+file:etc/inauto/update-server
+file:etc/x11vnc.pass
+dir:var/lib/rauc
+file:var/lib/systemd/random-seed
+"
+
+ensure_dir() { mkdir -p "$1"; }
+
+ensure_file() {
+    ensure_dir "$(dirname "$1")"
+    [ -e "$1" ] || : > "$1"
+}
+
+init_entry() {
+    kind="$1"
+    rel="$2"
+    persist_path="${PERSIST_ROOT}/${rel}"
+    lower_path="${LOWER_ROOT}/${rel}"
+
+    if [ -e "$persist_path" ]; then
+        return 0
+    fi
+
+    if [ -e "$lower_path" ]; then
+        ensure_dir "$(dirname "$persist_path")"
+        cp -a "$lower_path" "$persist_path"
+        return 0
+    fi
+
+    case "$kind" in
+        dir)  ensure_dir "$persist_path" ;;
+        file) ensure_file "$persist_path" ;;
+    esac
+}
+
+bind_entry() {
+    kind="$1"
+    rel="$2"
+    persist_path="${PERSIST_ROOT}/${rel}"
+    overlay_path="${OVERLAY_ROOT}/${rel}"
+
+    if [ ! -e "$persist_path" ]; then
+        return 0
+    fi
+
+    case "$kind" in
+        dir)  ensure_dir "$overlay_path" ;;
+        file) ensure_file "$overlay_path" ;;
+    esac
+
+    mount --bind "$persist_path" "$overlay_path"
+}
+
+parse_and_run() {
+    action="$1"
+    echo "$PERSIST_ENTRIES" | while IFS= read -r raw; do
+        entry="$(echo "$raw" | tr -d '[:space:]')"
+        [ -n "$entry" ] || continue
+        kind="${entry%%:*}"
+        rel="${entry#*:}"
+        "$action" "$kind" "$rel"
+    done
+}
+
+log "инициализация отсутствующих persistent-записей из $LOWER_ROOT"
+parse_and_run init_entry
+
+log "bind-mount persistent-записей в $OVERLAY_ROOT"
+parse_and_run bind_entry
+
+log "готово"

@@ -24,7 +24,15 @@ function chown_outputs() {
         chown -R "$HOST_UID:$HOST_GID" "$OUTPUT_ROOT/reports" || true
     fi
 
-    find "$OUTPUT_ROOT" -maxdepth 1 -type f -name '*.iso' -exec chown "$HOST_UID:$HOST_GID" {} + 2>/dev/null || true
+    # RAUC target output: <repo>/out/*.raucb (build-bundle.sh пишет туда от root).
+    local rauc_out
+    rauc_out="$(dirname "$OUTPUT_ROOT")/out"
+    if [[ -d "$rauc_out" ]]; then
+        chown -R "$HOST_UID:$HOST_GID" "$rauc_out" || true
+    fi
+
+    find "$OUTPUT_ROOT" -maxdepth 1 -type f \( -name '*.iso' -o -name '*.raucb' \) \
+        -exec chown "$HOST_UID:$HOST_GID" {} + 2>/dev/null || true
 }
 
 status=0

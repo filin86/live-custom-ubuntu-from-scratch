@@ -116,6 +116,37 @@ echo 'export TARGET_DISTRO="debian"' >> scripts/config.sh
 
 Под каждый дистрибутив собирается свой builder-образ (`livecd-builder-ubuntu:local` / `livecd-builder-debian:local`) и отдельный chroot-volume (`<repo>-chroot-<distro>`). Первая сборка под новый дистрибутив длиннее (пересборка builder-а + debootstrap с нуля).
 
+### Immutable panel firmware (RAUC target)
+
+Проект поддерживает альтернативную цель сборки — immutable firmware для operator-панелей через RAUC (A/B обновления, SquashFS rootfs, tmpfs overlay). Классический Live ISO остаётся дефолтом; `TARGET_FORMAT=rauc` опционально переключает pipeline на сборку подписанного `.raucb` bundle'а + USB installer payload'а.
+
+Поддерживаемая платформа для MVP: `pc-efi` (UEFI PC, amd64). Планшетный `<board>-uboot` — skeleton до идентификации BSP.
+
+```shell
+# Сборка RAUC bundle + installer payload из git-тега vYYYY.MM.DD.N:
+TARGET_FORMAT=rauc TARGET_PLATFORM=pc-efi TARGET_ARCH=amd64 \
+    RAUC_BUNDLE_VERSION="2026.04.21.1" \
+    ./scripts/build-in-docker.sh -
+```
+
+Артефакты: `out/inauto-panel-<distro>-<arch>-pc-efi-<version>.raucb` + `out/inauto-panel-installer-<distro>-<arch>-pc-efi-<version>.tar.zst`.
+
+Документация по immutable target'у:
+
+* `docs/runbooks/factory-provisioning.md` — первичная прошивка новой панели.
+* `docs/runbooks/field-migration.md` — перевод существующей mutable-панели на immutable.
+* `docs/runbooks/qemu-pc-efi-test.md` — QEMU + OVMF acceptance gate.
+* `docs/runbooks/release-workflow.md` — workflow release: git tag → CI → candidate → stable.
+* `docs/runbooks/rollback.md` — rollback на уровне slot и на уровне канала.
+* `docs/runbooks/troubleshooting.md` — диагностика типовых проблем.
+* `docs/runbooks/watchdog.md` — kernel panic / systemd watchdog / BootNext probation.
+* `docs/runbooks/docker-container-store.md` — что защищает и не защищает OS rollback.
+* `docs/runbooks/ci-pki-secrets.md` — CI secrets и ротация PKI.
+* `pki/README.md` — двухуровневая PKI (offline root CA + signing cert).
+* `server/README.md` — минимальный update server (FastAPI + SQLite + nginx).
+
+Update server и CI workflow (`.github/workflows/build-rauc-bundle.yml`) для доставки bundle'ов — opt-in, не требуются для ISO-сборок.
+
 ## Термины
 
 * `build system` - компьютерная среда, в которой запускаются скрипты сборки, генерирующие ISO.

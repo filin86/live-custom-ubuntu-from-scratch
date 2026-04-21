@@ -6,7 +6,7 @@ set -u                  # treat unset variable as error
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 
-CMD=(setup_host debootstrap prechroot chr_setup_host chr_install_pkg chr_customize_image chr_custom_conf chr_postpkginst scan_vulnerabilities chr_build_image chr_finish_up postchroot build_iso)
+CMD=(setup_host debootstrap prechroot chr_setup_host chr_install_pkg chr_customize_image chr_custom_conf chr_postpkginst scan_vulnerabilities chr_build_image chr_finish_up postchroot build_iso build_rauc_bundle build_installer_image)
 
 DATE=`TZ="UTC" date +"%y%m%d-%H%M%S"`
 ROOT_CMD=()
@@ -119,11 +119,32 @@ function load_config() {
 # Verify that necessary configuration values are set and they are valid
 function check_config() {
     local expected_config_version
-    expected_config_version="0.5"
+    expected_config_version="0.6"
 
     if [[ "$CONFIG_FILE_VERSION" != "$expected_config_version" ]]; then
         >&2 echo "Invalid or old config version $CONFIG_FILE_VERSION, expected $expected_config_version. Please update your scripts/config.sh from scripts/default_config.sh."
         exit 1
+    fi
+
+    case "${TARGET_FORMAT:-iso}" in
+        iso|rauc) ;;
+        *)
+            >&2 echo "ERROR: TARGET_FORMAT must be 'iso' or 'rauc' (got: '${TARGET_FORMAT:-<unset>}')"
+            exit 1
+            ;;
+    esac
+
+    if [[ "${TARGET_FORMAT:-iso}" == "rauc" ]]; then
+        case "${TARGET_PLATFORM:-}" in
+            pc-efi) ;;
+            *-uboot)
+                >&2 echo "NOTE: TARGET_PLATFORM='$TARGET_PLATFORM' is a U-Boot tablet target; production support requires board-tested boot chain."
+                ;;
+            *)
+                >&2 echo "ERROR: TARGET_FORMAT=rauc requires TARGET_PLATFORM=pc-efi or <board>-uboot (got: '${TARGET_PLATFORM:-<unset>}')"
+                exit 1
+                ;;
+        esac
     fi
 
     case "${TARGET_DISTRO:-}" in
@@ -431,6 +452,24 @@ function prechroot() {
     as_root install -m 0644 "$PROFILE_DIR/iso-layout/grub.cfg.template" chroot/root/profile/iso-layout/grub.cfg.template
     as_root install -m 0644 "$PROFILE_DIR/iso-layout/isolinux.cfg.template" chroot/root/profile/iso-layout/isolinux.cfg.template
 
+    # RAUC profile assets (templates, initramfs hooks, systemd units, helper scripts).
+    # Копируются всегда, чтобы chroot_build.sh/config.sh могли их использовать
+    # при TARGET_FORMAT=rauc. Для TARGET_FORMAT=iso просто остаются unused.
+    if [[ -d "$PROFILE_DIR/rauc" ]]; then
+        as_root cp -a "$PROFILE_DIR/rauc" chroot/root/profile/rauc
+    fi
+
+    # Keyring для RAUC target'а. Копируется только при TARGET_FORMAT=rauc,
+    # чтобы не путать ISO-сборки присутствием секрет-подобного артефакта.
+    if [[ "${TARGET_FORMAT:-iso}" == "rauc" ]]; then
+        local keyring_src="${RAUC_KEYRING_PATH:-$SCRIPT_DIR/../pki/dev-keyring.pem}"
+        if [[ ! -f "$keyring_src" ]]; then
+            >&2 echo "ERROR: RAUC_KEYRING_PATH='$keyring_src' отсутствует; для dev-сборок запустите pki/generate-dev-keys.sh"
+            exit 1
+        fi
+        as_root install -D -m 0644 "$keyring_src" chroot/root/rauc-keyring.pem
+    fi
+
     if [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
         as_root install -D -m 0644 /etc/ssl/certs/ca-certificates.crt \
             chroot/usr/local/share/ca-certificates/inauto-host-ca.crt
@@ -448,39 +487,50 @@ function prechroot() {
 
 # }
 
+# Запускает chroot-этап с проброшенным окружением для RAUC target'а.
+# Переменные пробрасываются всегда; для TARGET_FORMAT=iso внутри chroot
+# они просто игнорируются конфигом.
+function invoke_chroot_stage() {
+    local stage="$1"
+    as_root chroot chroot /usr/bin/env \
+        "DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive}" \
+        "TARGET_FORMAT=${TARGET_FORMAT:-iso}" \
+        "TARGET_PLATFORM=${TARGET_PLATFORM:-}" \
+        "TARGET_ARCH=${TARGET_ARCH:-}" \
+        "RAUC_BUNDLE_VERSION=${RAUC_BUNDLE_VERSION:-}" \
+        "INAUTO_OVERLAY_SIZE=${INAUTO_OVERLAY_SIZE:-2G}" \
+        "INAUTO_SITE_CONFIG_DIR=${INAUTO_SITE_CONFIG_DIR:-/home/inauto/config}" \
+        "INAUTO_AUTOSTART_SCRIPT=${INAUTO_AUTOSTART_SCRIPT:-/home/inauto/on_login}" \
+        "INAUTO_JOURNAL_DIR=${INAUTO_JOURNAL_DIR:-/home/inauto/log/journal}" \
+        /root/chroot_build.sh "$stage"
+}
+
 function chr_setup_host() {
-    as_root chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh setup_host
-    
+    invoke_chroot_stage setup_host
 }
 
 function chr_install_pkg() {
-    as_root chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh install_pkg
-    
+    invoke_chroot_stage install_pkg
 }
 
 function chr_customize_image() {
-    as_root chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh customize_image
-    
+    invoke_chroot_stage customize_image
 }
 
 function chr_custom_conf() {
-    as_root chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh custom_conf
-    
+    invoke_chroot_stage custom_conf
 }
 
 function chr_postpkginst() {
-    as_root chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh postpkginst
-    
+    invoke_chroot_stage postpkginst
 }
 
 function chr_build_image() {
-    as_root chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh build_image
-    
+    invoke_chroot_stage build_image
 }
 
 function chr_finish_up() {
-    as_root chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh finish_up
-    
+    invoke_chroot_stage finish_up
 }
 
 function postchroot() {
@@ -491,13 +541,14 @@ function postchroot() {
         as_root rm -f chroot/root/config.sh
     fi
     as_root rm -rf chroot/root/profile
+    as_root rm -f chroot/root/rauc-keyring.pem
 
     chroot_exit_teardown
 
 }
 
 function build_iso() {
-    echo "=====> running build_iso ..."
+    echo "=====> preparing rootfs squashfs ..."
 
     # Replace previous image artifacts to make repeated builds idempotent.
     as_root rm -rf image
@@ -519,6 +570,13 @@ function build_iso() {
 
     # write the filesystem.size
     printf "%s" "$(as_root du -sx --block-size=1 chroot | cut -f1)" | as_root tee image/$LIVE_BOOT_DIR/filesystem.size
+
+    if [[ "${TARGET_FORMAT:-iso}" == "rauc" ]]; then
+        echo "=====> TARGET_FORMAT=rauc: squashfs готов, ISO-packaging пропущен (см. build_rauc_bundle)"
+        return 0
+    fi
+
+    echo "=====> running build_iso (xorriso) ..."
 
     pushd "$SCRIPT_DIR/image"
 
@@ -558,6 +616,58 @@ function build_iso() {
          "."
 
     popd
+}
+
+# Собирает RAUC bundle (.raucb) для TARGET_FORMAT=rauc.
+# No-op при TARGET_FORMAT=iso, чтобы CMD-поток '-' работал для обоих target'ов.
+#
+# Требует, чтобы build_iso уже прогнал mksquashfs (squashfs лежит в
+# scripts/image/<LIVE_BOOT_DIR>/<LIVE_SQUASHFS_NAME>) и чтобы kernel/initrd
+# были скопированы chr_build_image'ом.
+function build_rauc_bundle() {
+    if [[ "${TARGET_FORMAT:-iso}" != "rauc" ]]; then
+        return 0
+    fi
+
+    echo "=====> running build_rauc_bundle ..."
+
+    export TARGET_DISTRO TARGET_FORMAT TARGET_PLATFORM TARGET_ARCH \
+        RAUC_BUNDLE_VERSION RAUC_SIGNING_CERT RAUC_SIGNING_KEY \
+        RAUC_INTERMEDIATE_CERT RAUC_VERSION_MODE
+
+    as_root env \
+        "TARGET_DISTRO=${TARGET_DISTRO:-}" \
+        "TARGET_FORMAT=${TARGET_FORMAT:-}" \
+        "TARGET_PLATFORM=${TARGET_PLATFORM:-}" \
+        "TARGET_ARCH=${TARGET_ARCH:-}" \
+        "RAUC_BUNDLE_VERSION=${RAUC_BUNDLE_VERSION:-}" \
+        "RAUC_SIGNING_CERT=${RAUC_SIGNING_CERT:-}" \
+        "RAUC_SIGNING_KEY=${RAUC_SIGNING_KEY:-}" \
+        "RAUC_INTERMEDIATE_CERT=${RAUC_INTERMEDIATE_CERT:-}" \
+        "RAUC_VERSION_MODE=${RAUC_VERSION_MODE:-release}" \
+        "$SCRIPT_DIR/targets/rauc/build-bundle.sh"
+}
+
+# Собирает installer payload (tar.zst) для TARGET_FORMAT=rauc.
+# No-op при TARGET_FORMAT=iso. Запускается сразу после build_rauc_bundle —
+# это позволяет одной командой `./scripts/build-in-docker.sh -` получить
+# оба артефакта без heredoc'ов через --shell, что недоступно в non-TTY CI.
+function build_installer_image() {
+    if [[ "${TARGET_FORMAT:-iso}" != "rauc" ]]; then
+        return 0
+    fi
+
+    echo "=====> running build_installer_image ..."
+
+    as_root env \
+        "TARGET_DISTRO=${TARGET_DISTRO:-}" \
+        "TARGET_FORMAT=${TARGET_FORMAT:-}" \
+        "TARGET_PLATFORM=${TARGET_PLATFORM:-}" \
+        "TARGET_ARCH=${TARGET_ARCH:-}" \
+        "RAUC_BUNDLE_VERSION=${RAUC_BUNDLE_VERSION:-}" \
+        "RAUC_VERSION_MODE=${RAUC_VERSION_MODE:-release}" \
+        "INSTALLER_KEYRING_SRC=${INSTALLER_KEYRING_SRC:-}" \
+        "$SCRIPT_DIR/targets/rauc/build-installer-image.sh"
 }
 
 # =============   main  ================

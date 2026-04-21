@@ -1,0 +1,13 @@
+[update]
+compatible=@COMPATIBLE@
+version=@RAUC_BUNDLE_VERSION@
+description=Inauto panel tablet firmware @RAUC_BUNDLE_VERSION@
+
+[bundle]
+format=verity
+
+[image.boot]
+filename=boot.vfat
+
+[image.rootfs]
+filename=rootfs.img
