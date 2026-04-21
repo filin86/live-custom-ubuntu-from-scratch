@@ -12,5 +12,6 @@ grub-efi-amd64-signed
 shim-signed
 mtools
 openssh-server
+wget
 unzip
 binutils

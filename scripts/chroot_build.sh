@@ -99,7 +99,7 @@ function setup_host() {
     echo "$TARGET_NAME" > /etc/hostname
 
     apt-get update
-    apt-get install -y libterm-readline-gnu-perl systemd-sysv
+    apt-get install -y libterm-readline-gnu-perl systemd-sysv dbus-bin
 
     dbus-uuidgen > /etc/machine-id
     ln -fs /etc/machine-id /var/lib/dbus/machine-id

@@ -195,7 +195,7 @@ function debootstrap() {
             --arch=amd64 \
             --variant=minbase \
             --components="$DEBOOTSTRAP_COMPONENTS" \
-            --include=ca-certificates \
+            --include=ca-certificates,gettext-base \
             "$TARGET_VERSION" \
             chroot \
             "$TARGET_MIRROR"
@@ -206,7 +206,7 @@ function debootstrap() {
             --arch=amd64 \
             --variant=minbase \
             --components="$DEBOOTSTRAP_COMPONENTS" \
-            --include=ca-certificates \
+            --include=ca-certificates,gettext-base \
             "$TARGET_VERSION" \
             chroot \
             "$TARGET_MIRROR"
