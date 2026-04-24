@@ -19,8 +19,9 @@
 #   bundle.raucb                     — подписанный RAUC bundle (ЕДИНСТВЕННЫЙ
 #                                       источник raw-байт для efi_A/B и
 #                                       rootfs_A/B: installer verify'ит
-#                                       подпись и extract'ит efi.vfat +
-#                                       rootfs.img в tmpdir перед dd).
+#                                       подпись и через `rauc mount`
+#                                       получает efi.vfat + rootfs.img
+#                                       перед dd).
 #   keyring.pem                      — RAUC keyring для verify подписи
 #   pc-efi.sgdisk                    — скрипт GPT разметки
 #   install-to-disk.sh               — этот скрипт
@@ -31,6 +32,8 @@
 #   TARGET_DEVICE          явный путь к диску (/dev/sda, /dev/nvme0n1)
 #   CONTAINER_STORE_SIZE   переопределение auto-size (передаётся pc-efi.sgdisk)
 #   INSTALLER_PAYLOAD_DIR  путь к /opt/inauto-installer (по умолчанию рядом со скриптом)
+#   SKIP_BACKUP            "1" — полностью пропустить backup/restore /home/inauto
+#   FORCE_YES              "1" — не спрашивать подтверждение перед стиранием диска
 #   DRY_RUN                "1" — не писать на диск, только показать команды (debug)
 
 set -euo pipefail
@@ -42,8 +45,12 @@ log()  { echo "[installer] $*"; }
 warn() { echo "[installer] WARN: $*" >&2; }
 fail() { echo "[installer] ERROR: $*" >&2; exit 1; }
 
+is_dry_run() {
+    [[ "${DRY_RUN:-0}" == "1" ]]
+}
+
 run() {
-    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    if is_dry_run; then
         log "DRY-RUN: $*"
     else
         "$@"
@@ -57,7 +64,7 @@ run() {
 [[ -d /sys/firmware/efi ]] \
     || fail "не UEFI runtime: /sys/firmware/efi отсутствует (pc-efi поддерживается только на UEFI PC)."
 
-for tool in sgdisk blockdev partprobe udevadm efibootmgr dd lsblk jq findmnt mkfs.ext4 mkfs.vfat ssh-keygen uuidgen mountpoint rauc; do
+for tool in sgdisk blockdev partprobe udevadm efibootmgr dd lsblk jq findmnt mkfs.ext4 mkfs.vfat ssh-keygen uuidgen mountpoint rauc unsquashfs blkid mount umount; do
     command -v "$tool" >/dev/null 2>&1 || fail "не найден инструмент '$tool'."
 done
 
@@ -100,7 +107,86 @@ select_target_device() {
 }
 
 TARGET_DEVICE="$(select_target_device)"
+TARGET_DEVICE="$(readlink -f "$TARGET_DEVICE")"
 log "target disk: $TARGET_DEVICE ($(blockdev --getsize64 "$TARGET_DEVICE") байт)"
+
+confirm_destructive_target() {
+    local target="$1"
+    local size_bytes
+    local details
+    local confirm
+
+    if is_dry_run; then
+        log "DRY-RUN: подтверждение стирания $target пропущено"
+        return 0
+    fi
+
+    if [[ "${FORCE_YES:-0}" == "1" ]]; then
+        warn "FORCE_YES=1 — подтверждение стирания $target пропущено"
+        return 0
+    fi
+
+    size_bytes="$(blockdev --getsize64 "$target" 2>/dev/null || printf 'unknown')"
+    details="$(lsblk -dpno NAME,SIZE,MODEL,SERIAL,TRAN "$target" 2>/dev/null || printf '%s' "$target")"
+
+    log "ВНИМАНИЕ: $target ($size_bytes байт) будет ПОЛНОСТЬЮ ПЕРЕЗАПИСАН."
+    log "Детали диска: $details"
+    if ! read -r -p "[installer] Продолжить? Введите 'yes': " confirm; then
+        fail "не удалось прочитать подтверждение; для автоматического запуска задайте FORCE_YES=1."
+    fi
+    [[ "$confirm" == "yes" ]] || {
+        log "Прерывание по запросу пользователя."
+        exit 1
+    }
+}
+
+confirm_destructive_target "$TARGET_DEVICE"
+
+partition_path_by_label() {
+    local label="$1"
+    lsblk -rno PATH,PARTLABEL "$TARGET_DEVICE" \
+        | awk -v label="$label" '$2 == label { print $1; exit }'
+}
+
+partition_number_by_label() {
+    case "$1" in
+        efi_A) printf '1\n' ;;
+        efi_B) printf '2\n' ;;
+        rootfs_A) printf '3\n' ;;
+        rootfs_B) printf '4\n' ;;
+        persist) printf '5\n' ;;
+        container-store) printf '6\n' ;;
+        inauto-data) printf '7\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+dry_run_partition_path() {
+    local label="$1"
+    local part_num
+    part_num="$(partition_number_by_label "$label")" \
+        || fail "unknown pc-efi partition label '$label' in dry-run"
+
+    if [[ "$TARGET_DEVICE" =~ [0-9]$ ]]; then
+        printf '%sp%s\n' "$TARGET_DEVICE" "$part_num"
+    else
+        printf '%s%s\n' "$TARGET_DEVICE" "$part_num"
+    fi
+}
+
+require_partition() {
+    local label="$1"
+    local path
+    path="$(partition_path_by_label "$label")"
+    if [[ -z "$path" || ! -b "$path" ]]; then
+        if is_dry_run; then
+            dry_run_partition_path "$label"
+            return 0
+        fi
+        fail "не найден раздел '$label' на выбранном диске $TARGET_DEVICE"
+    fi
+    printf '%s\n' "$path"
+}
 
 # --- 2.5. Backup существующего /home/inauto -------------------------------
 # Запускается ДО разметки target disk'а, чтобы успеть сохранить данные
@@ -115,7 +201,9 @@ BACKUP_SCRIPT="$PAYLOAD_DIR/backup-restore-home.sh"
 BACKUP_DIR="${BACKUP_DIR:-/tmp/inauto-backup}"
 export BACKUP_DIR
 
-if [[ -x "$BACKUP_SCRIPT" ]]; then
+if [[ "${SKIP_BACKUP:-0}" == "1" ]]; then
+    warn "SKIP_BACKUP=1 — backup/restore старого /home/inauto полностью пропущен"
+elif [[ -x "$BACKUP_SCRIPT" ]]; then
     log "попытка сохранить существующий /home/inauto (см. $BACKUP_DIR)"
     # Fail-by-default: helper успешно завершается, когда либо (а) backup
     # создан, либо (б) /home/inauto не найден (фабрично-новая панель).
@@ -147,25 +235,98 @@ BUNDLE="$PAYLOAD_DIR/bundle.raucb"
 KEYRING="$PAYLOAD_DIR/keyring.pem"
 SGDISK_SCRIPT="$PAYLOAD_DIR/pc-efi.sgdisk"
 FIRMWARE_VERSION_FILE="$PAYLOAD_DIR/firmware-version"
+TARGET_COMPATIBLE_FILE="$PAYLOAD_DIR/target-compatible"
+RAUC_INSTALLER_CONF="$(mktemp -t inauto-rauc-installer-XXXXXX.conf)"
+BUNDLE_INFO_FILE="$(mktemp -t inauto-rauc-info-XXXXXX.env)"
+RAUC_DATA_DIR="$(mktemp -d -t inauto-rauc-state-XXXXXX)"
+BUNDLE_EXTRACT_DIR=""
+RAUC_MOUNT_PREFIX=""
+BUNDLE_MOUNT_DIR=""
 
-for f in "$BUNDLE" "$KEYRING" "$SGDISK_SCRIPT"; do
+cleanup() {
+    if [[ -n "$BUNDLE_MOUNT_DIR" ]] && mountpoint -q "$BUNDLE_MOUNT_DIR"; then
+        umount "$BUNDLE_MOUNT_DIR" 2>/dev/null || true
+    fi
+    rm -rf "$BUNDLE_EXTRACT_DIR" "$RAUC_MOUNT_PREFIX" "$RAUC_INSTALLER_CONF" "$BUNDLE_INFO_FILE" "$RAUC_DATA_DIR"
+}
+
+trap cleanup EXIT
+
+for f in "$BUNDLE" "$KEYRING" "$SGDISK_SCRIPT" "$TARGET_COMPATIBLE_FILE"; do
     [[ -f "$f" ]] || fail "отсутствует payload artefact: $f"
 done
+
+: > "$RAUC_DATA_DIR/central.raucs"
+
+cat > "$RAUC_INSTALLER_CONF" <<EOF_RAUC_CONF
+[system]
+compatible=inauto-panel-installer
+bootloader=noop
+bundle-formats=-plain
+data-directory=$RAUC_DATA_DIR
+
+[keyring]
+path=$KEYRING
+EOF_RAUC_CONF
 
 # Verify подпись bundle'а. Если keyring не доверяет signing cert'у bundle'а —
 # fail до того, как мы что-то напишем на диск.
 log "проверяю подпись bundle'а: $BUNDLE (keyring=$KEYRING)"
-rauc info --keyring="$KEYRING" "$BUNDLE" >/dev/null \
+rauc info --conf="$RAUC_INSTALLER_CONF" --keyring="$KEYRING" \
+    --output-format=shell "$BUNDLE" > "$BUNDLE_INFO_FILE" \
     || fail "подпись $BUNDLE не верифицируется через $KEYRING — аварийно прерываюсь"
 
-# Извлекаем payload (efi.vfat + rootfs.img) из signed bundle в tmpdir.
-# Именно эти байты пойдут на диск — никакого сокращения доверия между
-# подписью и фактическим rootfs.
-BUNDLE_EXTRACT_DIR="$(mktemp -d -t inauto-bundle-XXXXXX)"
-trap 'rm -rf "$BUNDLE_EXTRACT_DIR"' EXIT
+parse_rauc_shell_value() {
+    local key="$1"
+    local file="$2"
+    sed -n "s/^${key}='\\([^']*\\)'$/\\1/p" "$file" | head -n1
+}
 
-log "распаковываю signed bundle → $BUNDLE_EXTRACT_DIR"
-rauc extract --keyring="$KEYRING" "$BUNDLE" "$BUNDLE_EXTRACT_DIR"
+EXPECTED_COMPATIBLE="$(tr -d '[:space:]' < "$TARGET_COMPATIBLE_FILE")"
+BUNDLE_COMPATIBLE="$(parse_rauc_shell_value RAUC_MF_COMPATIBLE "$BUNDLE_INFO_FILE")"
+[[ -n "$BUNDLE_COMPATIBLE" ]] || fail "не удалось прочитать RAUC_MF_COMPATIBLE из $BUNDLE"
+
+if [[ "$BUNDLE_COMPATIBLE" != "$EXPECTED_COMPATIBLE" ]]; then
+    fail "bundle compatible='$BUNDLE_COMPATIBLE' не совпадает с ожидаемым '$EXPECTED_COMPATIBLE'"
+fi
+log "bundle compatible OK: $BUNDLE_COMPATIBLE"
+
+# Извлекаем payload (efi.vfat + rootfs.img) из signed bundle в tmpdir.
+# Для verity bundle `rauc extract` требует exclusive access к файлу bundle'а
+# во время userspace payload-check. Для bundle'а, лежащего на /cdrom live ISO,
+# это ломается. `rauc mount` идёт по install-like пути (loop + verity) и
+# корректно работает с bundle'ом на смонтированном носителе.
+extract_bundle_images() {
+    local bundle="$1"
+    local out_dir="$2"
+
+    RAUC_MOUNT_PREFIX="$(mktemp -d -t inauto-rauc-mount-XXXXXX)"
+    BUNDLE_MOUNT_DIR="$RAUC_MOUNT_PREFIX/bundle"
+
+    log "монтирую signed bundle → $BUNDLE_MOUNT_DIR"
+    rauc mount --conf="$RAUC_INSTALLER_CONF" --keyring="$KEYRING" \
+        --mount "$RAUC_MOUNT_PREFIX" "$bundle" \
+        || fail "не удалось смонтировать bundle через rauc mount"
+
+    [[ -d "$BUNDLE_MOUNT_DIR" ]] \
+        || fail "rauc mount не создал ожидаемый mountpoint: $BUNDLE_MOUNT_DIR"
+
+    cp -f "$BUNDLE_MOUNT_DIR/efi.vfat" "$out_dir/efi.vfat" \
+        || fail "не удалось скопировать efi.vfat из mounted bundle"
+    cp -f "$BUNDLE_MOUNT_DIR/rootfs.img" "$out_dir/rootfs.img" \
+        || fail "не удалось скопировать rootfs.img из mounted bundle"
+
+    umount "$BUNDLE_MOUNT_DIR" \
+        || fail "не удалось размонтировать mounted bundle: $BUNDLE_MOUNT_DIR"
+    rmdir "$BUNDLE_MOUNT_DIR" 2>/dev/null || true
+    rmdir "$RAUC_MOUNT_PREFIX" 2>/dev/null || true
+    BUNDLE_MOUNT_DIR=""
+    RAUC_MOUNT_PREFIX=""
+}
+
+BUNDLE_EXTRACT_DIR="$(mktemp -d -t inauto-bundle-XXXXXX)"
+log "извлекаю images из signed bundle → $BUNDLE_EXTRACT_DIR"
+extract_bundle_images "$BUNDLE" "$BUNDLE_EXTRACT_DIR"
 
 EFI_IMG="$BUNDLE_EXTRACT_DIR/efi.vfat"
 ROOTFS_IMG="$BUNDLE_EXTRACT_DIR/rootfs.img"
@@ -189,6 +350,13 @@ run env TARGET_DEVICE="$TARGET_DEVICE" bash "$SGDISK_SCRIPT"
 
 # pc-efi.sgdisk уже форматирует vfat/ext4 — нам остаётся писать rootfs.
 
+EFI_A_DEV="$(require_partition efi_A)"
+EFI_B_DEV="$(require_partition efi_B)"
+ROOTFS_A_DEV="$(require_partition rootfs_A)"
+ROOTFS_B_DEV="$(require_partition rootfs_B)"
+PERSIST_DEV="$(require_partition persist)"
+INAUTO_DATA_DEV="$(require_partition inauto-data)"
+
 # --- 5. Raw-write efi + rootfs в оба slot-group ---------------------------
 
 write_image_raw() {
@@ -202,31 +370,95 @@ write_image_raw() {
 log "заливаю efi_A/efi_B из $EFI_IMG"
 # После mkfs.vfat в pc-efi.sgdisk на efi_A/efi_B уже лежит пустой FAT32.
 # Raw dd затирает пустой FAT32 нашим образом EFI-stub kernel + initrd.
-write_image_raw "$EFI_IMG"    /dev/disk/by-partlabel/efi_A
-write_image_raw "$EFI_IMG"    /dev/disk/by-partlabel/efi_B
+write_image_raw "$EFI_IMG"    "$EFI_A_DEV"
+write_image_raw "$EFI_IMG"    "$EFI_B_DEV"
 
 log "заливаю rootfs_A/rootfs_B из $ROOTFS_IMG"
-write_image_raw "$ROOTFS_IMG" /dev/disk/by-partlabel/rootfs_A
-write_image_raw "$ROOTFS_IMG" /dev/disk/by-partlabel/rootfs_B
+write_image_raw "$ROOTFS_IMG" "$ROOTFS_A_DEV"
+write_image_raw "$ROOTFS_IMG" "$ROOTFS_B_DEV"
 
 run sync
 run partprobe "$TARGET_DEVICE" || true
 run udevadm settle --timeout=10 || true
 
-# --- 6. UEFI boot entries --------------------------------------------------
-
-# Вычисляем номер партиции efi_A/efi_B относительно диска.
-part_number_for_label() {
+validate_efi_slot() {
     local label="$1"
-    local part
-    part="$(readlink -f "/dev/disk/by-partlabel/$label")"
-    [[ -n "$part" ]] || return 1
-    # /dev/sda3 -> 3; /dev/nvme0n1p3 -> 3; /dev/mmcblk0p3 -> 3
-    echo "$part" | sed -E 's#.*[^0-9]([0-9]+)$#\1#'
+    local device
+    local mnt
+
+    device="$(require_partition "$label")"
+
+    is_dry_run && return 0
+
+    mnt="$(mktemp -d)"
+    if ! mount -o ro "$device" "$mnt"; then
+        rmdir "$mnt" 2>/dev/null || true
+        fail "не удалось смонтировать $label после записи EFI image"
+    fi
+
+    if [[ ! -s "$mnt/EFI/BOOT/BOOTX64.EFI" ]]; then
+        umount "$mnt" 2>/dev/null || true
+        rmdir "$mnt" 2>/dev/null || true
+        fail "$label не содержит EFI loader: \\EFI\\BOOT\\BOOTX64.EFI"
+    fi
+
+    if [[ ! -s "$mnt/EFI/Linux/initrd.img" ]]; then
+        umount "$mnt" 2>/dev/null || true
+        rmdir "$mnt" 2>/dev/null || true
+        fail "$label не содержит initrd: \\EFI\\Linux\\initrd.img"
+    fi
+
+    umount "$mnt"
+    rmdir "$mnt"
 }
 
-EFI_A_PART="$(part_number_for_label efi_A)" || fail "не удалось определить partition # для efi_A"
-EFI_B_PART="$(part_number_for_label efi_B)" || fail "не удалось определить partition # для efi_B"
+validate_rootfs_slot() {
+    local label="$1"
+    local device
+    local fs_type
+
+    device="$(require_partition "$label")"
+
+    is_dry_run && return 0
+
+    fs_type="$(blkid -o value -s TYPE "$device" 2>/dev/null || true)"
+    [[ "$fs_type" == "squashfs" ]] \
+        || fail "$label после записи не определяется как squashfs (blkid TYPE='${fs_type:-<empty>}')"
+}
+
+log "проверяю записанные boot/rootfs slot'ы"
+validate_efi_slot efi_A
+validate_efi_slot efi_B
+validate_rootfs_slot rootfs_A
+validate_rootfs_slot rootfs_B
+
+# --- 6. UEFI boot entries --------------------------------------------------
+
+# Вычисляем номер партиции efi_A/efi_B относительно выбранного диска.
+part_number_for_device() {
+    local part="$1"
+    local label="${2:-}"
+    local part_num
+
+    if is_dry_run; then
+        [[ -n "$label" ]] || return 1
+        partition_number_by_label "$label"
+        return
+    fi
+
+    part_num="$(lsblk -dn -o PARTN "$part" | tr -d '[:space:]' || true)"
+    if [[ -n "$part_num" ]]; then
+        printf '%s\n' "$part_num"
+        return 0
+    fi
+    # /dev/sda3 -> 3; /dev/nvme0n1p3 -> 3; /dev/mmcblk0p3 -> 3
+    part_num="$(echo "$part" | sed -E 's#.*[^0-9]([0-9]+)$#\1#')"
+    [[ "$part_num" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$part_num"
+}
+
+EFI_A_PART="$(part_number_for_device "$EFI_A_DEV" efi_A)" || fail "не удалось определить partition # для efi_A"
+EFI_B_PART="$(part_number_for_device "$EFI_B_DEV" efi_B)" || fail "не удалось определить partition # для efi_B"
 
 log "регистрирую UEFI boot entries на $TARGET_DEVICE (efi_A=$EFI_A_PART, efi_B=$EFI_B_PART)"
 
@@ -234,6 +466,12 @@ log "регистрирую UEFI boot entries на $TARGET_DEVICE (efi_A=$EFI_A_
 remove_existing_entry() {
     local label="$1"
     local existing
+
+    if is_dry_run; then
+        log "DRY-RUN: пропускаю чтение/удаление существующих UEFI entries для $label"
+        return 0
+    fi
+
     existing="$(efibootmgr -v 2>/dev/null | awk -v lbl="$label" '$0 ~ lbl { sub(/^Boot/, "", $1); sub(/\*$/, "", $1); print $1 }' || true)"
     for bootnum in $existing; do
         log "удаляю старую запись Boot$bootnum ($label)"
@@ -244,7 +482,7 @@ remove_existing_entry() {
 remove_existing_entry "system0"
 remove_existing_entry "system1"
 
-LOADER_PATH='\EFI\Linux\inauto-panel.efi'
+LOADER_PATH='\EFI\BOOT\BOOTX64.EFI'
 # Kernel cmdline: тот же, что в system.conf:[slot.efi.N]::efi-cmdline.
 # RAUC при install перепишет entry своим (с тем же cmdline), но на factory
 # boot firmware использует ровно то, что мы положим сюда через --unicode.
@@ -272,6 +510,15 @@ run efibootmgr \
 # Вытащим bootnum'ы new'ых entries для установки BootOrder.
 get_bootnum() {
     local label="$1"
+    if is_dry_run; then
+        case "$label" in
+            system0) printf '0000\n' ;;
+            system1) printf '0001\n' ;;
+            *) return 1 ;;
+        esac
+        return
+    fi
+
     efibootmgr -v 2>/dev/null | awk -v lbl="$label" '$0 ~ lbl { sub(/^Boot/, "", $1); sub(/\*$/, "", $1); print $1; exit }'
 }
 
@@ -288,7 +535,7 @@ run efibootmgr --bootorder "$BOOTNUM_A,$BOOTNUM_B"
 
 # persist: machine-id, ssh host keys, x11vnc.pass placeholder, /etc/inauto/*
 PERSIST_MNT="$(mktemp -d)"
-run mount /dev/disk/by-partlabel/persist "$PERSIST_MNT"
+run mount "$PERSIST_DEV" "$PERSIST_MNT"
 
 init_persist_skeleton() {
     install -d -m 0755 "$PERSIST_MNT/etc" "$PERSIST_MNT/etc/ssh" \
@@ -335,34 +582,44 @@ init_persist_skeleton() {
     fi
 }
 
-init_persist_skeleton
+if is_dry_run; then
+    log "DRY-RUN: пропускаю инициализацию persist skeleton в $PERSIST_MNT"
+else
+    init_persist_skeleton
+fi
 
 run umount "$PERSIST_MNT"
 rmdir "$PERSIST_MNT"
 
 # inauto-data: скелет home/inauto с site hooks
 INAUTO_MNT="$(mktemp -d)"
-run mount /dev/disk/by-partlabel/inauto-data "$INAUTO_MNT"
+run mount "$INAUTO_DATA_DEV" "$INAUTO_MNT"
 
-install -d -m 0755 \
-    "$INAUTO_MNT/on_start/before_login" \
-    "$INAUTO_MNT/on_start/oneshot" \
-    "$INAUTO_MNT/on_start/forking" \
-    "$INAUTO_MNT/on_login" \
-    "$INAUTO_MNT/staff" \
-    "$INAUTO_MNT/log"
+if is_dry_run; then
+    log "DRY-RUN: пропускаю инициализацию inauto-data skeleton и restore backup в $INAUTO_MNT"
+else
+    install -d -m 0755 \
+        "$INAUTO_MNT/on_start/before_login" \
+        "$INAUTO_MNT/on_start/oneshot" \
+        "$INAUTO_MNT/on_start/forking" \
+        "$INAUTO_MNT/on_login" \
+        "$INAUTO_MNT/staff" \
+        "$INAUTO_MNT/log"
 
-[[ -e "$INAUTO_MNT/.inautolock" ]] || : > "$INAUTO_MNT/.inautolock"
+    [[ -e "$INAUTO_MNT/.inautolock" ]] || : > "$INAUTO_MNT/.inautolock"
 
-# --- 7.5. Restore backup в /home/inauto/backup ---------------------------
-# Архив (если есть) распаковывается в подкаталог backup/ — skeleton
-# (.inautolock + on_start/on_login/staff/log) остаётся нетронутым.
-# Наладчик вручную решает, что переносить из backup/ в active layout.
+    # --- 7.5. Restore backup в /home/inauto/backup ---------------------------
+    # Архив (если есть) распаковывается в подкаталог backup/ — skeleton
+    # (.inautolock + on_start/on_login/staff/log) остаётся нетронутым.
+    # Наладчик вручную решает, что переносить из backup/ в active layout.
 
-if [[ -x "$BACKUP_SCRIPT" ]]; then
-    log "попытка восстановить $BACKUP_DIR → $INAUTO_MNT/backup"
-    BACKUP_DIR="$BACKUP_DIR" "$BACKUP_SCRIPT" restore "$INAUTO_MNT/backup" \
-        || warn "restore не выполнен; backup остаётся в $BACKUP_DIR до reboot'а"
+    if [[ "${SKIP_BACKUP:-0}" == "1" ]]; then
+        log "restore backup пропущен (SKIP_BACKUP=1)"
+    elif [[ -x "$BACKUP_SCRIPT" ]]; then
+        log "попытка восстановить $BACKUP_DIR → $INAUTO_MNT/backup"
+        BACKUP_DIR="$BACKUP_DIR" "$BACKUP_SCRIPT" restore "$INAUTO_MNT/backup" \
+            || warn "restore не выполнен; backup остаётся в $BACKUP_DIR до reboot'а"
+    fi
 fi
 
 run umount "$INAUTO_MNT"

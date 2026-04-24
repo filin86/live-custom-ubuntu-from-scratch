@@ -45,35 +45,41 @@ function apt_install_list() {
 
 function help() {
     # if $1 is set, use $1 as headline message in help()
-    if [ -z ${1+x} ]; then
-        echo -e "This script builds Ubuntu from scratch"
-        echo -e
+    if [[ -z "${1+x}" ]]; then
+        printf '%s\n\n' "This script builds Ubuntu from scratch"
     else
-        echo -e $1
-        echo
+        printf '%s\n\n' "$1"
     fi
-    echo -e "Supported commands : ${CMD[*]}"
-    echo -e
-    echo -e "Syntax: $0 [start_cmd] [-] [end_cmd]"
-    echo -e "\trun from start_cmd to end_end"
-    echo -e "\tif start_cmd is omitted, start from first command"
-    echo -e "\tif end_cmd is omitted, end with last command"
-    echo -e "\tenter single cmd to run the specific command"
-    echo -e "\tenter '-' as only argument to run all commands"
-    echo -e
+    printf '%s\n\n' "Supported commands : ${CMD[*]}"
+    printf '%s\n' "Syntax: $0 [start_cmd] [-] [end_cmd]"
+    printf '\t%s\n' "run from start_cmd to end_end"
+    printf '\t%s\n' "if start_cmd is omitted, start from first command"
+    printf '\t%s\n' "if end_cmd is omitted, end with last command"
+    printf '\t%s\n' "enter single cmd to run the specific command"
+    printf '\t%s\n\n' "enter '-' as only argument to run all commands"
     exit 0
 }
 
 function find_index() {
-    local ret;
     local i;
     for ((i=0; i<${#CMD[*]}; i++)); do
         if [ "${CMD[i]}" == "$1" ]; then
-            index=$i;
-            return;
+            printf '%s\n' "$i"
+            return 0
         fi
     done
-    help "Command not found : $1"
+    return 1
+}
+
+function require_efi_loader() {
+    local loader="$1"
+    local package_hint="$2"
+
+    if [[ ! -s "$loader" ]]; then
+        >&2 printf 'ERROR: required EFI loader not found: %s\n' "$loader"
+        >&2 printf '       Check that profile live-packages.list installs %s.\n' "$package_hint"
+        exit 1
+    fi
 }
 
 function check_host() {
@@ -99,25 +105,26 @@ function setup_host() {
     echo "$TARGET_NAME" > /etc/hostname
 
     apt-get update
-    apt-get install -y libterm-readline-gnu-perl systemd-sysv
+    apt-get install -y libterm-readline-gnu-perl systemd-sysv dbus-bin
 
     dbus-uuidgen > /etc/machine-id
     ln -fs /etc/machine-id /var/lib/dbus/machine-id
 
-    dpkg-divert --local --rename --add /sbin/initctl
+    if ! dpkg-divert --list /sbin/initctl | grep -q 'local diversion'; then
+        dpkg-divert --local --rename --add /sbin/initctl
+    fi
+    rm -f /sbin/initctl
     ln -s /bin/true /sbin/initctl
 }
 
 # Load configuration values from file
 function load_config() {
-    if [[ -f "$SCRIPT_DIR/config.sh" ]]; then 
-        . "$SCRIPT_DIR/config.sh"
-    elif [[ -f "$SCRIPT_DIR/default_config.sh" ]]; then
-        . "$SCRIPT_DIR/default_config.sh"
-    else
-        >&2 echo "Unable to find default config file  $SCRIPT_DIR/default_config.sh, aborting."
+    if [[ ! -f "$SCRIPT_DIR/config.sh" ]]; then
+        >&2 echo "ERROR: $SCRIPT_DIR/config.sh не найден — build.sh должен был его скопировать в chroot."
         exit 1
     fi
+    # shellcheck source=/dev/null
+    . "$SCRIPT_DIR/config.sh"
 }
 
 
@@ -152,7 +159,11 @@ function postpkginst() {
     # final touch
     dpkg-reconfigure -f noninteractive locales keyboard-configuration console-setup
 
-    apt-get clean -y
+    if [[ "${LIVECD_KEEP_APT_CACHE:-0}" == "1" ]]; then
+        echo "Keeping apt package cache for faster rebuilds (LIVECD_KEEP_APT_CACHE=1)"
+    else
+        apt-get clean -y
+    fi
 }
 
 function build_image() {
@@ -194,11 +205,14 @@ function build_image() {
     cp "$kernel_src" "$LIVE_BOOT_DIR/$LIVE_KERNEL_NAME"
     cp "$initrd_src" "$LIVE_BOOT_DIR/$LIVE_INITRD_NAME"
 
-    # memtest86
-    wget --progress=dot https://memtest.org/download/v7.20/mt86plus_7.20.binaries.zip -O install/memtest86.zip
-    unzip -p install/memtest86.zip memtest64.bin > install/memtest86+.bin
-    unzip -p install/memtest86.zip memtest64.efi > install/memtest86+.efi
-    rm -f install/memtest86.zip
+    # memtest86+ comes from the distro package instead of an unverified network archive.
+    if [[ ! -s /boot/memtest86+x64.bin || ! -s /boot/memtest86+x64.efi ]]; then
+        >&2 echo "ERROR: memtest86+ package files not found in /boot"
+        >&2 echo "Install the memtest86+ package in the live profile before building the ISO"
+        exit 1
+    fi
+    install -m 0644 /boot/memtest86+x64.bin install/memtest86+.bin
+    install -m 0644 /boot/memtest86+x64.efi install/memtest86+.efi
 
     # grub
     profile_write_image_marker
@@ -227,20 +241,34 @@ function build_image() {
 EOF
 
     # copy EFI loaders
-    cp /usr/lib/shim/shimx64.efi.signed.previous isolinux/bootx64.efi
-    cp /usr/lib/shim/mmx64.efi isolinux/mmx64.efi
-    cp /usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed isolinux/grubx64.efi
+    local efi_grub_dir="${EFI_GRUB_DIR:-ubuntu}"
+    local shim_loader="/usr/lib/shim/shimx64.efi.signed"
+    local mok_manager="/usr/lib/shim/mmx64.efi"
+    local grub_loader="/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed"
+
+    if [[ ! "$efi_grub_dir" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        >&2 echo "ERROR: EFI_GRUB_DIR contains unsupported characters: $efi_grub_dir"
+        exit 1
+    fi
+
+    require_efi_loader "$shim_loader" "shim-signed"
+    require_efi_loader "$mok_manager" "shim-signed"
+    require_efi_loader "$grub_loader" "grub-efi-amd64-signed"
+
+    cp "$shim_loader" isolinux/bootx64.efi
+    cp "$mok_manager" isolinux/mmx64.efi
+    cp "$grub_loader" isolinux/grubx64.efi
 
     # create a FAT16 UEFI boot disk image containing the EFI bootloaders
     (
         cd isolinux && \
         dd if=/dev/zero of=efiboot.img bs=1M count=10 && \
         mkfs.vfat -F 16 efiboot.img && \
-        LC_CTYPE=C mmd -i efiboot.img efi efi/ubuntu efi/boot && \
+        LC_CTYPE=C mmd -i efiboot.img efi "efi/$efi_grub_dir" efi/boot && \
         LC_CTYPE=C mcopy -i efiboot.img ./bootx64.efi ::efi/boot/bootx64.efi && \
         LC_CTYPE=C mcopy -i efiboot.img ./mmx64.efi ::efi/boot/mmx64.efi && \
         LC_CTYPE=C mcopy -i efiboot.img ./grubx64.efi ::efi/boot/grubx64.efi && \
-        LC_CTYPE=C mcopy -i efiboot.img ./grub.cfg ::efi/ubuntu/grub.cfg
+        LC_CTYPE=C mcopy -i efiboot.img ./grub.cfg "::efi/$efi_grub_dir/grub.cfg"
     )
 
     # create a grub BIOS image
@@ -269,8 +297,10 @@ function finish_up() {
     truncate -s 0 /etc/machine-id
 
     # remove diversion (why??)
-    rm /sbin/initctl
-    dpkg-divert --rename --remove /sbin/initctl
+    rm -f /sbin/initctl
+    if dpkg-divert --list /sbin/initctl | grep -q 'local diversion'; then
+        dpkg-divert --rename --remove /sbin/initctl
+    fi
 
     rm -rf /tmp/* ~/.bash_history
 }
@@ -281,27 +311,30 @@ load_config
 check_host
 
 # check number of args
-if [[ $# == 0 || $# > 3 ]]; then help; fi
+if (( $# == 0 || $# > 3 )); then help; fi
 
 # loop through args
 dash_flag=false
 start_index=0
 end_index=${#CMD[*]}
+cmd_index=0
 for ii in "$@";
 do
     if [[ $ii == "-" ]]; then
         dash_flag=true
         continue
     fi
-    find_index $ii
+    if ! cmd_index="$(find_index "$ii")"; then
+        help "Command not found : $ii"
+    fi
     if [[ $dash_flag == false ]]; then
-        start_index=$index
+        start_index=$cmd_index
     else
-        end_index=$(($index+1))
+        end_index=$((cmd_index + 1))
     fi
 done
 if [[ $dash_flag == false ]]; then
-    end_index=$(($start_index + 1))
+    end_index=$((start_index + 1))
 fi
 
 # loop through the commands

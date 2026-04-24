@@ -1,9 +1,7 @@
 #!/bin/bash
 
-# This script provides common customization options for the ISO
-#
-# Usage: Copy this file to config.sh and make changes there. Keep this file (default_config.sh) as-is
-# so that subsequent changes can be easily merged from upstream. Keep all customizations in config.sh
+# Основной конфиг сборки. Обязателен — build.sh падает при его отсутствии.
+# Для заводского образа-инсталлятора используется scripts/config-installer.sh.
 
 # The version of Ubuntu to generate. Successfully tested LTS: bionic, focal, jammy, noble
 # See https://wiki.ubuntu.com/DevelopmentCodeNames for details
@@ -16,6 +14,9 @@ export TARGET_UBUNTU_MIRROR="https://archive.ubuntu.com/ubuntu/"
 # Distro selector.
 export TARGET_DISTRO="${TARGET_DISTRO:-ubuntu}"
 
+# Build profile selector. Defaults to TARGET_DISTRO for normal images.
+export TARGET_PROFILE="${TARGET_PROFILE:-$TARGET_DISTRO}"
+
 # Debian parameters (active when TARGET_DISTRO=debian).
 export TARGET_DEBIAN_VERSION="trixie"
 export TARGET_DEBIAN_MIRROR="http://deb.debian.org/debian/"
@@ -25,24 +26,35 @@ export TARGET_KERNEL_PACKAGE="linux-generic"
 
 # The file (no extension) of the ISO containing the generated disk image,
 # the volume id, and the hostname of the live environment are set from this name.
-export TARGET_NAME="inauto-ubuntu-livecd"
+export TARGET_NAME="${TARGET_NAME:-inauto-${TARGET_DISTRO:-ubuntu}-livecd}"
 
 # Build target selection.
 # TARGET_FORMAT=iso  — classic Live ISO (default, current workflow).
 # TARGET_FORMAT=rauc — immutable firmware via RAUC; see docs/superpowers/specs/2026-04-20-immutable-panel-firmware-design.md.
 export TARGET_FORMAT="${TARGET_FORMAT:-iso}"
 
+# panel             — обычный образ панели;
+# factory-installer — отдельная live-среда для прошивки панели из RAUC payload.
+export INAUTO_IMAGE_ROLE="${INAUTO_IMAGE_ROLE:-panel}"
+
 # Hardware platform for the rauc target (ignored when TARGET_FORMAT=iso).
 # Supported for MVP: pc-efi (x86_64/amd64 UEFI).
 export TARGET_PLATFORM="${TARGET_PLATFORM:-pc-efi}"
 
-# Target CPU architecture (informational).
+# Target CPU architecture for debootstrap and target metadata.
 export TARGET_ARCH="${TARGET_ARCH:-amd64}"
 
 # Immutable firmware bundle version (rauc target only).
 # Must be provided explicitly for release builds; CI derives it from the git tag.
 # Production versions must match ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$.
 export RAUC_BUNDLE_VERSION="${RAUC_BUNDLE_VERSION:-}"
+
+# RAUC CLI/runtime version built from upstream source.
+export RAUC_PINNED_VERSION="${RAUC_PINNED_VERSION:-1.15.2}"
+
+# Version suffix for RAUC compatible strings:
+# inauto-panel-<distro>-<arch>-<platform>-<RAUC_COMPATIBLE_VERSION>.
+export RAUC_COMPATIBLE_VERSION="${RAUC_COMPATIBLE_VERSION:-v1}"
 
 # Size of the tmpfs overlay upper layer for the immutable RAUC rootfs.
 export INAUTO_OVERLAY_SIZE="${INAUTO_OVERLAY_SIZE:-2G}"
@@ -115,7 +127,9 @@ function custom_conf() {
     net_config
 	ensure_network_manager_renderer
     ssh_conf
+    ensure_panel_autologin_user
 	configure_autologin
+    configure_live_username
     enable_on_screen_kbd
     enable_vnc
 
@@ -147,7 +161,7 @@ function custom_conf() {
         docker.socket \
         x11vnc.service
 
-	echo -e "Inmark2026\nInmark2026" | passwd root
+	printf '%s\n%s\n' "Inmark2026" "Inmark2026" | passwd root
 
     remove_unused_features
     remove_dangerous
@@ -321,6 +335,58 @@ function customize_image() {
     install_rauc_packages
 }
 
+
+function ensure_panel_autologin_user() {
+    local group_name
+    local groups=(
+        adm
+        cdrom
+        sudo
+        dip
+        plugdev
+        video
+        audio
+        netdev
+    )
+
+    if ! rauc_enabled; then
+        return 0
+    fi
+
+    if ! id -u "$AUTOLOGIN_USER" >/dev/null 2>&1; then
+        useradd -m -s /bin/bash "$AUTOLOGIN_USER"
+        passwd -d "$AUTOLOGIN_USER" >/dev/null 2>&1 || true
+    fi
+
+    for group_name in "${groups[@]}"; do
+        ensure_group_member "$group_name" "$AUTOLOGIN_USER"
+    done
+
+    install -d -m 0755 /etc/sudoers.d
+    cat > "/etc/sudoers.d/90-inauto-panel-user" <<EOF_SUDOERS
+$AUTOLOGIN_USER ALL=(ALL) NOPASSWD:ALL
+EOF_SUDOERS
+    chmod 0440 "/etc/sudoers.d/90-inauto-panel-user"
+}
+
+function install_pinned_rauc() {
+    local installer="/root/install-rauc-source.sh"
+    local actual
+
+    if [[ ! -x "$installer" ]]; then
+        echo "[rauc] ERROR: $installer отсутствует; build.sh::prechroot должен его скопировать." >&2
+        exit 1
+    fi
+
+    RAUC_PINNED_VERSION="${RAUC_PINNED_VERSION:-1.15.2}" "$installer"
+
+    actual="$(rauc --version 2>/dev/null | awk 'NR == 1 { print $NF }' || true)"
+    if [[ "$actual" != "${RAUC_PINNED_VERSION:-1.15.2}" ]]; then
+        echo "[rauc] ERROR: ожидался RAUC ${RAUC_PINNED_VERSION:-1.15.2}, получено '${actual:-<missing>}'" >&2
+        exit 1
+    fi
+}
+
 function net_config() {
 	apt-get install -y netplan.io util-linux network-manager
     systemctl enable NetworkManager.service
@@ -345,6 +411,14 @@ user-session=$AUTOLOGIN_SESSION
 greeter-hide-users=true
 allow-guest=false
 EOF_LIGHTDM
+}
+
+function configure_live_username() {
+    if [[ "${TARGET_DISTRO:-ubuntu}" != "debian" ]]; then
+        return 0
+    fi
+    mkdir -p /etc/live/config
+    printf 'LIVE_USERNAME="%s"\n' "$AUTOLOGIN_USER" > /etc/live/config/user-setup.conf
 }
 
 function enable_vnc() {
@@ -1068,6 +1142,7 @@ function install_rauc_packages() {
         curl \
         efibootmgr \
         openssh-server
+    install_pinned_rauc
 }
 
 # Рендерит /etc/rauc/system.conf из платформо-специфичного шаблона.
@@ -1075,12 +1150,19 @@ function render_rauc_system_conf() {
     local platform="${TARGET_PLATFORM:-}"
     local distro="${TARGET_DISTRO:-}"
     local arch="${TARGET_ARCH:-}"
+    local compatible_version="${RAUC_COMPATIBLE_VERSION:-v1}"
+    local compatible
     local template
 
     if [[ -z "$distro" || -z "$arch" || -z "$platform" ]]; then
         echo "[rauc] ERROR: TARGET_DISTRO/TARGET_ARCH/TARGET_PLATFORM обязательны для RAUC target'а" >&2
         exit 1
     fi
+    if [[ ! "$compatible_version" =~ ^v[0-9]+$ ]]; then
+        echo "[rauc] ERROR: RAUC_COMPATIBLE_VERSION должен иметь формат v<N>, получено '$compatible_version'" >&2
+        exit 1
+    fi
+    compatible="inauto-panel-${distro}-${arch}-${platform}-${compatible_version}"
 
     case "$platform" in
         pc-efi)
@@ -1102,6 +1184,7 @@ function render_rauc_system_conf() {
 
     install -d -m 0755 /etc/rauc
     sed \
+        -e "s|@COMPATIBLE@|$compatible|g" \
         -e "s|@DISTRO@|$distro|g" \
         -e "s|@ARCH@|$arch|g" \
         -e "s|@PLATFORM@|$platform|g" \
@@ -1181,6 +1264,7 @@ function install_rauc_update_agent() {
     systemctl enable panel-check-updates.timer
     echo "[rauc] panel-check-updates.timer включён"
 }
+
 
 # Конфигурирует systemd watchdog для production rollout'ов.
 # Kernel panic timeout уже в kernel cmdline через system.conf.template (panic=30).

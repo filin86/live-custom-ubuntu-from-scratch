@@ -88,7 +88,7 @@ cd pki/
 1. Проверяет наличие Root CA.
 2. Проверяет отсутствие сети.
 3. Запрашивает подтверждение.
-4. Генерирует RSA-4096 signing key, подписывает через Root CA, срок 2 года.
+4. Генерирует RSA-4096 signing key, подписывает через Root CA, срок 5 лет по умолчанию (допустимый production-диапазон 3-5 лет).
 5. Выводит SHA-256 fingerprint signing-cert'а.
 
 На выходе:
@@ -136,7 +136,7 @@ openssl verify -CAfile prod-root-ca.crt prod-signing.crt
 
 ## Ротация
 
-### Signing cert — каждые 2 года
+### Signing cert — до истечения production signing cert
 
 1. Снова подготовить air-gap машину (см. шаг 1).
 2. Восстановить `prod-root-ca.key` и `prod-root-ca.crt` с одного из зашифрованных USB на air-gap.

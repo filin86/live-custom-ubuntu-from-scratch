@@ -3,9 +3,9 @@ search --set=root --file /ubuntu
 insmod all_video
 
 set default="0"
-set timeout=1
+set timeout=5
 
-menuentry "Inautomatic Ubuntu" {
+menuentry "Inauto Panel Installer" {
     linux /$LIVE_BOOT_DIR/vmlinuz boot=casper $LIVE_BOOT_ARGS ---
     initrd /$LIVE_BOOT_DIR/initrd
 }

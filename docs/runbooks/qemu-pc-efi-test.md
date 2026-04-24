@@ -51,6 +51,7 @@ qemu-img create -f qcow2 /tmp/panel.qcow2 64G
 3. Запустить `/opt/inauto-installer/install-to-disk.sh`:
    - `TARGET_DEVICE=/dev/vdb` (или что увидит lsblk — наш qcow2 обычно second drive).
    - `SKIP_REBOOT=1` при CI чтобы контролировать reboot самим.
+   - `FORCE_YES=1` в CI/unattended-сценариях, чтобы пропустить интерактивное подтверждение стирания тестового диска.
 
 Пример QEMU команды для live-сессии:
 

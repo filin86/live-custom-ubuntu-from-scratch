@@ -9,8 +9,9 @@ grub-common
 grub-pc-bin
 grub2-common
 grub-efi-amd64-bin
+grub-efi-amd64-signed
 shim-signed
 mtools
 openssh-server
-unzip
+memtest86+
 binutils

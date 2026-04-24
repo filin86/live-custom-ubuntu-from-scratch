@@ -1,6 +1,6 @@
 #!/bin/bash
 # Генерирует PROD Signing Cert (подписан Root CA). Запускается на air-gap машине,
-# где уже лежит prod-root-ca.key. Каждые ~2 года.
+# где уже лежит prod-root-ca.key. Ротация по умолчанию каждые ~5 лет.
 #
 # Output:
 #   prod-signing.key  — передаётся в CI через secure channel (CI secrets)
@@ -16,7 +16,17 @@ cd "$(dirname "$0")"
 
 ORG="${ORG:-Inauto Panels}"
 RSA_BITS="${RSA_BITS:-4096}"
-VALIDITY_DAYS="${VALIDITY_DAYS:-730}"  # 2 года
+VALIDITY_DAYS="${VALIDITY_DAYS:-1825}"  # 5 лет
+
+if ! [[ "$VALIDITY_DAYS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: VALIDITY_DAYS must be a positive integer, got: $VALIDITY_DAYS" >&2
+    exit 1
+fi
+if (( VALIDITY_DAYS < 1095 || VALIDITY_DAYS > 1825 )); then
+    echo "ERROR: production signing cert validity must be 3-5 years (1095-1825 days)." >&2
+    echo "       Got VALIDITY_DAYS=$VALIDITY_DAYS." >&2
+    exit 1
+fi
 
 # Наличие root CA
 if [[ ! -f prod-root-ca.key || ! -f prod-root-ca.crt ]]; then

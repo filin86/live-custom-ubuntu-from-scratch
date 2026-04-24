@@ -1,11 +1,11 @@
 UI vesamenu.c32
 
-MENU TITLE Inautomatic Ubuntu Boot Menu
+MENU TITLE Inauto Panel Installer
 DEFAULT live
-TIMEOUT 30
+TIMEOUT 50
 
 LABEL live
-    MENU LABEL Boot Inautomatic Ubuntu
+    MENU LABEL Inauto Panel Installer
     KERNEL /$LIVE_BOOT_DIR/vmlinuz
     APPEND initrd=/$LIVE_BOOT_DIR/initrd boot=casper $LIVE_BOOT_ARGS ---
 

@@ -1,138 +1,131 @@
 # Runbook: factory provisioning новой панели
 
-Дата: 2026-04-20
+Дата: 2026-04-21
 Применимость: первичная прошивка operator-панели (UEFI PC) immutable firmware'ом.
 
 ## Требования
 
-- Новая или прошедшая полную очистку панель с UEFI (legacy BIOS не поддерживается).
-- Внутренний накопитель ≥ 32 GiB (SATA/NVMe/eMMC — любой).
-- Installer payload: `out/inauto-panel-installer-<distro>-<arch>-pc-efi-<version>.tar.zst`.
-- Ubuntu 24.04 Live USB (общедоступный, любой mirror).
-- Клавиатура + монитор (для первичной настройки UEFI boot).
+- Новая или прошедшая полную очистку панель с UEFI; legacy BIOS не поддерживается.
+- Внутренний накопитель >= 32 GiB: SATA/NVMe/eMMC.
+- Preferred: bootable installer ISO
+  `out/inauto-panel-installer-<distro>-<arch>-pc-efi-<version>.iso`.
+- Fallback: installer payload
+  `out/inauto-panel-installer-<distro>-<arch>-pc-efi-<version>.tar.zst`
+  + Ubuntu/Debian Live USB.
+- Клавиатура + монитор для первичной настройки UEFI boot.
 
-## Подготовка installer USB
+## Подготовка USB
 
-До прихода на shop floor:
+До прихода на объект:
 
-1. Собрать installer payload (CI делает это автоматически при tag):
+1. Собрать RAUC target и отдельный factory-installer ISO:
+   ```bash
+   RAUC_BUNDLE_VERSION=<version> ./scripts/build-rauc-installer.sh
    ```
-   TARGET_FORMAT=rauc TARGET_PLATFORM=pc-efi ./scripts/build-in-docker.sh -
+   Если нужно пересобрать с чистым APT-кэшем пакетов:
+   ```bash
+   RAUC_BUNDLE_VERSION=<version> ./scripts/build-rauc-installer.sh --clean-cache
    ```
-2. Скачать Ubuntu 24.04 Live ISO.
-3. Записать Ubuntu Live на USB (Rufus/balenaEtcher, GPT, UEFI mode).
-4. На второй USB (или в `/home/ubuntu` на том же) положить tar.zst payload
-   и его `.sha256`.
+2. Проверить checksum:
+   ```bash
+   cd out
+   sha256sum -c inauto-panel-installer-*.iso.sha256
+   ```
+3. Записать installer ISO на USB: Rufus/balenaEtcher, GPT, UEFI mode.
 
-## На панели: шаги установки
+## Установка
 
-### Шаг 1. Boot с Ubuntu Live USB
+### 1. Boot
 
 1. Воткнуть USB, включить панель.
-2. Зайти в UEFI (обычно `Del`/`F2`/`F12`), выбрать boot с USB.
-3. В меню GRUB — «Try Ubuntu».
+2. В UEFI boot menu выбрать USB entry с пометкой `UEFI`.
+3. Дождаться загрузки live-системы.
 
-### Шаг 2. Развернуть payload
+### 2. Мастер
 
-В терминале Ubuntu Live:
-
-```bash
-sudo -i
-
-# Проверить что мы UEFI:
-ls /sys/firmware/efi && echo "UEFI ok" || { echo "BIOS — abort"; exit 1; }
-
-# Скопировать payload с второго USB (или из сети).
-cp /media/ubuntu/<USB>/inauto-panel-installer-*.tar.zst /tmp/
-sha256sum -c /media/ubuntu/<USB>/inauto-panel-installer-*.tar.zst.sha256
-
-# Распаковать в /opt
-mkdir -p /opt
-tar -I zstd -xf /tmp/inauto-panel-installer-*.tar.zst -C /opt
-```
-
-### Шаг 3. Выбрать target disk
+Мастер установки должен открыться автоматически. На рабочем столе также есть
+ярлык `Inauto Panel Installer`. Если мастер не открылся:
 
 ```bash
-lsblk -d -o NAME,SIZE,RM,MODEL
+/cdrom/inauto-installer/START-INSTALLER.sh
 ```
 
-`RM=0` — non-removable (внутренний SSD). Обычно это `/dev/sda` или
-`/dev/nvme0n1`. USB-флешки видны с `RM=1` — их ни в коем случае не брать.
-
-### Шаг 4. Запустить installer
+На Debian live путь может быть:
 
 ```bash
-TARGET_DEVICE=/dev/<диск> /opt/inauto-installer/install-to-disk.sh
+/run/live/medium/inauto-installer/START-INSTALLER.sh
 ```
 
-Если только один non-removable диск ≥ 32 GiB — `TARGET_DEVICE` можно не
-указывать, installer выберет автоматически.
+Мастер:
 
-**Dry-run** (проверка без записи):
+- проверяет UEFI mode;
+- показывает список внутренних дисков `>= 32 GiB`;
+- в начале спрашивает, нужен ли backup старого `/home/inauto`;
+- если backup нужен, предлагает место для архива;
+- просит ввести `ERASE` перед стиранием диска;
+- показывает прогресс установки;
+- предлагает reboot после успешной установки.
 
-```bash
-TARGET_DEVICE=/dev/<диск> DRY_RUN=1 /opt/inauto-installer/install-to-disk.sh
-```
+### 3. Первый Boot
 
-### Шаг 5. Ожидаемая последовательность действий installer'а
+После reboot вытащить installer USB.
 
-Installer выводит `[installer] ...` строки. Ключевые этапы:
+Панель должна сама загрузиться с внутреннего диска. UEFI BootOrder должен быть
+`system0, system1`. Если панель снова приходит в installer USB, USB не вытащен
+или firmware вмешался со своим boot entry.
 
-```
-[installer] target disk: /dev/<диск> (<bytes>)
-[installer] firmware version: <VERSION>
-[installer] создаю GPT разметку (/opt/inauto-installer/pc-efi.sgdisk)
-[pc-efi.sgdisk] Layout: efi_A=512M ... container-store=NG inauto-data=NG
-[pc-efi.sgdisk] Форматируем EFI-разделы как FAT32
-[pc-efi.sgdisk] Форматируем ext4-разделы (persist, container-store, inauto-data)
-[installer] заливаю efi_A/efi_B из efi.vfat
-[installer] заливаю rootfs_A/rootfs_B из rootfs.img
-[installer] регистрирую UEFI boot entries (efi_A=X, efi_B=Y)
-[installer] устанавливаю BootOrder=XXXX,YYYY
-[installer] установка завершена; перезагружаюсь через 10 секунд
-```
+Ожидаемо при первом boot:
 
-### Шаг 6. Первая загрузка
+- LightDM с auto-login user `ubuntu`;
+- `/home/inauto` смонтирован из `inauto-data`;
+- `/etc/inauto/firmware-version` соответствует установленной версии;
+- SSH и x11vnc доступны.
 
-После reboot вытащить Ubuntu Live USB.
-
-Панель должна сама загрузиться с внутреннего диска (UEFI запомнил
-BootOrder = `system0, system1`). Если панель снова приходит в GRUB
-Ubuntu Live — USB не вытащен, либо BIOS вмешался со своим boot entry
-(см. troubleshooting.md).
-
-Ожидаемо при первом boot'е:
-- ~15–20 секунд до LightDM (auto-login user `ubuntu`).
-- XFCE с открытым compose-проектом (если на панель настроен он в `/home/inauto`).
-- SSH и x11vnc работают; пароли из `/persist/etc/x11vnc.pass`.
-
-### Шаг 7. Настройка update-сервера
+### 4. Update Server
 
 ```bash
 ssh ubuntu@<ip_панели>
 sudo -i
 
-# Записать персистентные параметры.
-echo "https://panels.example.com"  > /etc/inauto/update-server
-echo "stable"                       > /etc/inauto/channel
-echo "panel-<site>-<n>"             > /etc/inauto/serial.txt
+echo "https://panels.example.com" > /etc/inauto/update-server
+echo "stable"                    > /etc/inauto/channel
+echo "panel-<site>-<n>"          > /etc/inauto/serial.txt
 
 systemctl restart panel-check-updates.timer
-systemctl list-timers panel-check-updates.timer  # следующий tick ожидаем в пределах ~5 минут
+systemctl list-timers panel-check-updates.timer
 ```
 
-Через 5–10 минут в `panels` таблице на update-server'е должен появиться
+Через 5-10 минут в `panels` таблице на update-server'е должен появиться
 heartbeat от нового serial.
 
-## Acceptance checklist
+## Fallback: Live USB + Payload
 
-- [ ] `efibootmgr -v` показывает `system0` и `system1`, BootOrder = system0,system1.
-- [ ] `rauc status` показывает booted slot = `system0`, slot state = good.
+Использовать только если bootable installer ISO недоступен.
+
+1. Загрузить панель с Ubuntu/Debian Live USB в UEFI mode.
+2. Скопировать `inauto-panel-installer-*.tar.zst` на live-систему.
+3. Распаковать:
+   ```bash
+   sudo mkdir -p /opt
+   sudo tar -I zstd -xf inauto-panel-installer-*.tar.zst -C /opt
+   ```
+4. Запустить мастер:
+   ```bash
+   /opt/inauto-installer/START-INSTALLER.sh
+   ```
+
+Если live-система не содержит нужных пакетов (`rauc`, `gdisk`, `jq`, `zstd`,
+`efibootmgr` и т.п.), мастер предложит установить их через `apt`.
+
+## Acceptance Checklist
+
+- [ ] `efibootmgr -v` показывает `system0` и `system1`, BootOrder = `system0,system1`.
+- [ ] `rauc status` показывает booted slot = `system0`, slot state = `good`.
 - [ ] `/home/inauto/.inautolock` существует; skeleton директорий создан.
 - [ ] `/etc/inauto/firmware-version` = ожидаемая `<VERSION>`.
-- [ ] `docker info` работает; `systemctl is-active lightdm docker containerd x11vnc ssh` все active.
-- [ ] Heartbeat появился в `panels.last_seen` на update-сервере.
+- [ ] `docker info` работает.
+- [ ] `systemctl is-active lightdm docker containerd x11vnc ssh` все `active`.
+- [ ] Heartbeat появился в `panels.last_seen` на update-server'е.
 - [ ] Overlay reset подтверждён: создать `/etc/marker`, reboot, убедиться что он исчез.
 
-Если все пункты зелёные — панель сдана в эксплуатацию.
+Если все пункты зелёные, панель сдана в эксплуатацию.

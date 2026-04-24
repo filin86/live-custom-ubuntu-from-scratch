@@ -7,14 +7,14 @@
 
 | Variable | Тип GitLab | Protected | Masked | Где используется | Ротация |
 |---|---|---|---|---|---|
-| `RAUC_SIGNING_CERT` | **File** | yes | — | `rauc bundle --cert` (путь к файлу) | каждые 2 года |
-| `RAUC_SIGNING_KEY` | **File** | yes | — | `rauc bundle --key` (путь к файлу) | каждые 2 года |
+| `RAUC_SIGNING_CERT` | **File** | yes | — | `rauc bundle --cert` (путь к файлу) | 3-5 лет, default 5 лет |
+| `RAUC_SIGNING_KEY` | **File** | yes | — | `rauc bundle --key` (путь к файлу) | 3-5 лет, default 5 лет |
 | `RAUC_INTERMEDIATE_CERT` | **File** (optional) | yes | — | `rauc bundle --intermediate` | вместе со signing |
 | `RAUC_KEYRING` | **File** | yes | — | PEM (`prod-keyring.pem`) → rootfs `/etc/rauc/keyring.pem` и installer payload | раз в 20 лет (ротация root CA) |
 | `UPDATE_SERVER_DEPLOY_TOKEN` | Variable | yes | **yes** | `curl -H "Authorization: Bearer ..."` к `/api/upload` | при compromise или раз в 6–12 мес |
 | `UPDATE_SERVER_URL` | Variable | yes | no | базовый URL для upload | при смене инфраструктуры |
 
-**`RAUC_KEYRING` vs `RAUC_SIGNING_CERT`**: signing cert используется один раз — CI подписывает им bundle, после чего cert физически уходит в подпись артефакта. Keyring же попадает в rootfs и installer как public trust anchor: panel без него НЕ доверяет ни одному prod bundle'у, factory install с dev keyring'ом отвергнет prod-signed payload через `rauc extract`. Поэтому в release-mode pipeline пробрасывает обе переменные; при отсутствии `RAUC_KEYRING` build прерывается на этапе restore signing keypair.
+**`RAUC_KEYRING` vs `RAUC_SIGNING_CERT`**: signing cert используется один раз — CI подписывает им bundle, после чего cert физически уходит в подпись артефакта. Keyring же попадает в rootfs и installer как public trust anchor: panel без него НЕ доверяет ни одному prod bundle'у, factory install с dev keyring'ом отвергнет prod-signed payload уже на этапе verify/mount bundle. Поэтому в release-mode pipeline пробрасывает обе переменные; при отсутствии `RAUC_KEYRING` build прерывается на этапе restore signing keypair.
 
 Пометка **Protected** означает, что variable доступна только protected branches/tags — наши release-теги `vYYYY.MM.DD.N` обязаны быть protected в `Settings → Repository → Protected tags`, иначе pipeline со secret'ами не запустится на форк-коммитах или неавторизованных тегах.
 
@@ -127,7 +127,7 @@ download'а / публикации в release asset'ы.
 
 ## Ротация
 
-### Signing cert (каждые 2 года)
+### Signing cert (до истечения production signing cert)
 
 1. На air-gap машине запустить `./pki/generate-prod-signing-cert.sh`.
 2. Скопировать `prod-signing.crt` / `prod-signing.key` на флешку.

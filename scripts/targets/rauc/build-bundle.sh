@@ -6,7 +6,8 @@
 #   - scripts/image/<LIVE_BOOT_DIR>/<LIVE_KERNEL_NAME>    (chr_build_image);
 #   - scripts/image/<LIVE_BOOT_DIR>/<LIVE_INITRD_NAME>    (chr_build_image);
 #   - RAUC_BUNDLE_VERSION (от CI/пользователя; production regex валидируется);
-#   - RAUC_SIGNING_CERT/RAUC_SIGNING_KEY либо fallback на pki/dev-signing.*.
+#   - RAUC_SIGNING_CERT/RAUC_SIGNING_KEY for release builds.
+#     dev-ok builds may fall back to pki/dev-signing.*.
 #
 # Результат:
 #   out/<artifact_name>  (по умолчанию rel. к REPO_ROOT/out).
@@ -61,12 +62,28 @@ sed \
     -e "s|@RAUC_BUNDLE_VERSION@|$RAUC_BUNDLE_VERSION|g" \
     "$manifest_tmpl" > "$WORK_DIR/manifest.raucm"
 
-SIGN_CERT="${RAUC_SIGNING_CERT:-$REPO_ROOT/pki/dev-signing.crt}"
-SIGN_KEY="${RAUC_SIGNING_KEY:-$REPO_ROOT/pki/dev-signing.key}"
+SIGN_CERT="${RAUC_SIGNING_CERT:-}"
+SIGN_KEY="${RAUC_SIGNING_KEY:-}"
 INTERMEDIATE="${RAUC_INTERMEDIATE_CERT:-}"
+if [[ -z "$SIGN_CERT" || -z "$SIGN_KEY" ]]; then
+    if [[ "${RAUC_VERSION_MODE:-release}" == "release" ]]; then
+        fail "RAUC_SIGNING_CERT и RAUC_SIGNING_KEY обязательны для release-сборки."
+    fi
+    SIGN_CERT="$REPO_ROOT/pki/dev-signing.crt"
+    SIGN_KEY="$REPO_ROOT/pki/dev-signing.key"
+    log "WARNING: RAUC_SIGNING_CERT/KEY не заданы; используется dev signing cert: $SIGN_CERT"
+fi
 
 [[ -f "$SIGN_CERT" ]] || fail "signing cert не найден: $SIGN_CERT"
 [[ -f "$SIGN_KEY" ]]  || fail "signing key не найден: $SIGN_KEY"
+
+if [[ "${RAUC_VERSION_MODE:-release}" == "release" ]]; then
+    min_days="${RAUC_SIGNING_CERT_MIN_DAYS:-1095}"
+    [[ "$min_days" =~ ^[0-9]+$ ]] || fail "RAUC_SIGNING_CERT_MIN_DAYS должен быть числом дней."
+    if ! openssl x509 -in "$SIGN_CERT" -checkend "$((min_days * 86400))" -noout >/dev/null; then
+        fail "production signing cert истекает раньше чем через $min_days дней: $SIGN_CERT"
+    fi
+fi
 
 rauc_args=(bundle "--cert=$SIGN_CERT" "--key=$SIGN_KEY")
 if [[ -n "$INTERMEDIATE" ]]; then

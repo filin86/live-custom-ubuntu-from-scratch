@@ -154,14 +154,28 @@ build_heartbeat_body() {
 
 INSTALL_EXIT=0
 if should_install; then
-    log "rauc install $BUNDLE_URL"
-    if rauc install "$BUNDLE_URL"; then
-        log "rauc install успешен; перезагружаюсь"
-        systemctl reboot
-        exit 0
-    else
+    # RAUC собирается с -Dnetwork=false: передавать HTTP URL напрямую в
+    # `rauc install` нельзя. Скачиваем bundle через curl, затем устанавливаем
+    # из локального файла.
+    BUNDLE_TMP="$(mktemp -t inauto-bundle-XXXXXX.raucb)"
+    trap 'rm -f "$BUNDLE_TMP"' EXIT
+
+    log "скачиваю bundle: $BUNDLE_URL"
+    if ! curl -fSL --max-time 300 \
+            -H "X-Panel-Serial: ${SERIAL}" \
+            -o "$BUNDLE_TMP" "$BUNDLE_URL"; then
         INSTALL_EXIT=$?
-        warn "rauc install вернул $INSTALL_EXIT; отправляю heartbeat с last_error"
+        warn "curl завершился с кодом $INSTALL_EXIT; отправляю heartbeat с last_error"
+    else
+        log "rauc install $BUNDLE_TMP"
+        if rauc install "$BUNDLE_TMP"; then
+            log "rauc install успешен; перезагружаюсь"
+            systemctl reboot
+            exit 0
+        else
+            INSTALL_EXIT=$?
+            warn "rauc install вернул $INSTALL_EXIT; отправляю heartbeat с last_error"
+        fi
     fi
 fi
 

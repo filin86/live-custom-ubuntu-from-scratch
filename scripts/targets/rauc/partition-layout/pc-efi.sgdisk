@@ -24,9 +24,9 @@
 #   SKIP_FORMAT            — если "1", не форматировать ext4/vfat-разделы
 #                            (только раскладка GPT). По умолчанию "0".
 #
-# Partlabels используются через /dev/disk/by-partlabel/<label>; суффиксы
-# SATA/SCSI/NVMe/MMC (sdaN, nvme0n1pN, mmcblk0pN) здесь не фиксируются,
-# поэтому скрипт переносимо работает на разных шинах.
+# Partlabels остаются стабильными именами для установленной системы, но сам
+# installer форматирует только разделы, найденные внутри выбранного TARGET_DEVICE.
+# Это защищает от случайного попадания в одноимённый slot на другом диске.
 
 set -euo pipefail
 
@@ -37,8 +37,9 @@ fail() { echo "[pc-efi.sgdisk] ERROR: $*" >&2; exit 1; }
 
 [[ -n "$TARGET_DEVICE" ]] || fail "TARGET_DEVICE не задан. Передайте через env или первым аргументом."
 [[ -b "$TARGET_DEVICE" ]] || fail "$TARGET_DEVICE не является block device."
+TARGET_DEVICE="$(readlink -f "$TARGET_DEVICE")"
 
-for tool in sgdisk partprobe udevadm blockdev mkfs.vfat mkfs.ext4; do
+for tool in sgdisk partprobe udevadm blockdev mkfs.vfat mkfs.ext4 lsblk; do
     command -v "$tool" >/dev/null 2>&1 || fail "Не найден инструмент '$tool'."
 done
 
@@ -99,21 +100,35 @@ log "partprobe + udev settle"
 partprobe "$TARGET_DEVICE" || true
 udevadm settle --timeout=10 || true
 
-# Ждём появления всех partlabel-симлинков.
-wait_for_partlabel() {
+partition_path_by_label() {
     local label="$1"
-    local link="/dev/disk/by-partlabel/$label"
-    local i
-    for (( i = 0; i < 40; i++ )); do
-        [[ -b "$link" ]] && return 0
-        sleep 0.25
-    done
-    fail "Partlabel '$label' не появился в /dev/disk/by-partlabel/ после partprobe."
+    lsblk -rno PATH,PARTLABEL "$TARGET_DEVICE" \
+        | awk -v label="$label" '$2 == label { print $1; exit }'
 }
 
-for label in efi_A efi_B rootfs_A rootfs_B persist container-store inauto-data; do
-    wait_for_partlabel "$label"
-done
+# Ждём появления всех нужных partlabel'ов именно на TARGET_DEVICE.
+wait_for_partlabel() {
+    local label="$1"
+    local path
+    local i
+    for (( i = 0; i < 40; i++ )); do
+        path="$(partition_path_by_label "$label")"
+        if [[ -n "$path" && -b "$path" ]]; then
+            printf '%s\n' "$path"
+            return 0
+        fi
+        sleep 0.25
+    done
+    fail "Partlabel '$label' не появился на $TARGET_DEVICE после partprobe."
+}
+
+EFI_A_DEV="$(wait_for_partlabel efi_A)"
+EFI_B_DEV="$(wait_for_partlabel efi_B)"
+ROOTFS_A_DEV="$(wait_for_partlabel rootfs_A)"
+ROOTFS_B_DEV="$(wait_for_partlabel rootfs_B)"
+PERSIST_DEV="$(wait_for_partlabel persist)"
+CONTAINER_STORE_DEV="$(wait_for_partlabel container-store)"
+INAUTO_DATA_DEV="$(wait_for_partlabel inauto-data)"
 
 if [[ "${SKIP_FORMAT:-0}" == "1" ]]; then
     log "SKIP_FORMAT=1 — форматирование пропущено"
@@ -121,15 +136,15 @@ if [[ "${SKIP_FORMAT:-0}" == "1" ]]; then
 fi
 
 log "Форматируем EFI-разделы как FAT32"
-mkfs.vfat -F 32 -n EFI_A /dev/disk/by-partlabel/efi_A >/dev/null
-mkfs.vfat -F 32 -n EFI_B /dev/disk/by-partlabel/efi_B >/dev/null
+mkfs.vfat -F 32 -n EFI_A "$EFI_A_DEV" >/dev/null
+mkfs.vfat -F 32 -n EFI_B "$EFI_B_DEV" >/dev/null
 
 log "Форматируем ext4-разделы (persist, container-store, inauto-data)"
-mkfs.ext4 -F -L persist         /dev/disk/by-partlabel/persist >/dev/null
-mkfs.ext4 -F -L container-store /dev/disk/by-partlabel/container-store >/dev/null
-mkfs.ext4 -F -L inauto-data     /dev/disk/by-partlabel/inauto-data >/dev/null
+mkfs.ext4 -F -L persist         "$PERSIST_DEV" >/dev/null
+mkfs.ext4 -F -L container-store "$CONTAINER_STORE_DEV" >/dev/null
+mkfs.ext4 -F -L inauto-data     "$INAUTO_DATA_DEV" >/dev/null
 
 # Raw-слоты rootfs_A/rootfs_B НЕ форматируются: RAUC пишет в них SquashFS-байты.
-log "rootfs_A/rootfs_B оставлены без файловой системы (raw для RAUC)"
+log "rootfs_A/rootfs_B оставлены без файловой системы (raw для RAUC): $ROOTFS_A_DEV $ROOTFS_B_DEV"
 
 log "Layout готов. Проверьте: sgdisk -p $TARGET_DEVICE"

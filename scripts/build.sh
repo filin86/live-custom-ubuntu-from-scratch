@@ -6,9 +6,9 @@ set -u                  # treat unset variable as error
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 
-CMD=(setup_host debootstrap prechroot chr_setup_host chr_install_pkg chr_customize_image chr_custom_conf chr_postpkginst scan_vulnerabilities chr_build_image chr_finish_up postchroot build_iso build_rauc_bundle build_installer_image)
+CMD=(setup_host debootstrap prechroot chr_setup_host chr_install_pkg chr_customize_image chr_custom_conf chr_postpkginst scan_vulnerabilities chr_build_image chr_finish_up postchroot build_iso build_rauc_bundle build_installer_image build_rauc_installer_iso)
 
-DATE=`TZ="UTC" date +"%y%m%d-%H%M%S"`
+DATE="$(TZ="UTC" date +"%y%m%d-%H%M%S")"
 ROOT_CMD=()
 
 function as_root() {
@@ -29,38 +29,41 @@ function require_sudo() {
 
 function help() {
     # if $1 is set, use $1 as headline message in help()
-    if [ -z ${1+x} ]; then
-        echo -e "This script builds a bootable ubuntu ISO image"
-        echo -e
+    if [[ -z "${1+x}" ]]; then
+        printf '%s\n\n' "This script builds a bootable ubuntu ISO image"
     else
-        echo -e $1
-        echo
+        printf '%s\n\n' "$1"
     fi
-    echo -e "Supported commands : ${CMD[*]}"
-    echo -e
-    echo -e "Syntax: $0 [start_cmd] [-] [end_cmd]"
-    echo -e "\trun from start_cmd to end_end"
-    echo -e "\tif start_cmd is omitted, start from first command"
-    echo -e "\tif end_cmd is omitted, end with last command"
-    echo -e "\tenter single cmd to run the specific command"
-    echo -e "\tenter '-' as only argument to run all commands"
-    echo -e
+    printf '%s\n\n' "Supported commands : ${CMD[*]}"
+    printf '%s\n' "Syntax: $0 [start_cmd] [-] [end_cmd]"
+    printf '\t%s\n' "run from start_cmd to end_end"
+    printf '\t%s\n' "if start_cmd is omitted, start from first command"
+    printf '\t%s\n' "if end_cmd is omitted, end with last command"
+    printf '\t%s\n' "enter single cmd to run the specific command"
+    printf '\t%s\n\n' "enter '-' as only argument to run all commands"
     exit 0
 }
 
 function find_index() {
-    local ret;
     local i;
     for ((i=0; i<${#CMD[*]}; i++)); do
         if [ "${CMD[i]}" == "$1" ]; then
-            index=$i;
-            return;
+            printf '%s\n' "$i"
+            return 0
         fi
     done
-    help "Command not found : $1"
+    return 1
 }
 
 function chroot_enter_setup() {
+    if [[ -n "${LIVECD_APT_CACHE_DIR:-}" && -d "${LIVECD_APT_CACHE_DIR:-}" ]]; then
+        as_root mkdir -p chroot/var/cache/apt/archives
+        if ! as_root mountpoint -q chroot/var/cache/apt/archives; then
+            as_root mount --bind "$LIVECD_APT_CACHE_DIR" chroot/var/cache/apt/archives
+        fi
+        as_root mkdir -p chroot/var/cache/apt/archives/partial
+    fi
+
     as_root mount --bind /dev chroot/dev
     as_root mount --bind /run chroot/run
     as_root chroot chroot mount none -t proc /proc
@@ -74,6 +77,9 @@ function chroot_exit_teardown() {
     as_root chroot chroot umount /dev/pts
     as_root umount chroot/dev
     as_root umount chroot/run
+    if as_root mountpoint -q chroot/var/cache/apt/archives; then
+        as_root umount chroot/var/cache/apt/archives
+    fi
 }
 
 function check_host() {
@@ -106,14 +112,11 @@ function check_host() {
 
 # Load configuration values from file
 function load_config() {
-    if [[ -f "$SCRIPT_DIR/config.sh" ]]; then
-        . "$SCRIPT_DIR/config.sh"
-    elif [[ -f "$SCRIPT_DIR/default_config.sh" ]]; then
-        . "$SCRIPT_DIR/default_config.sh"
-    else
-        >&2 echo "Unable to find default config file  $SCRIPT_DIR/default_config.sh, aborting."
+    if [[ ! -f "$SCRIPT_DIR/config.sh" ]]; then
+        >&2 echo "ERROR: scripts/config.sh не найден. Создайте его на основе любого существующего конфига в этом репозитории."
         exit 1
     fi
+    . "$SCRIPT_DIR/config.sh"
 }
 
 # Verify that necessary configuration values are set and they are valid
@@ -122,7 +125,7 @@ function check_config() {
     expected_config_version="0.6"
 
     if [[ "$CONFIG_FILE_VERSION" != "$expected_config_version" ]]; then
-        >&2 echo "Invalid or old config version $CONFIG_FILE_VERSION, expected $expected_config_version. Please update your scripts/config.sh from scripts/default_config.sh."
+        >&2 echo "Invalid or old config version $CONFIG_FILE_VERSION, expected $expected_config_version. Please update CONFIG_FILE_VERSION in your scripts/config.sh."
         exit 1
     fi
 
@@ -130,6 +133,14 @@ function check_config() {
         iso|rauc) ;;
         *)
             >&2 echo "ERROR: TARGET_FORMAT must be 'iso' or 'rauc' (got: '${TARGET_FORMAT:-<unset>}')"
+            exit 1
+            ;;
+    esac
+
+    case "${INAUTO_IMAGE_ROLE:-panel}" in
+        panel|factory-installer) ;;
+        *)
+            >&2 echo "ERROR: INAUTO_IMAGE_ROLE must be 'panel' or 'factory-installer' (got: '${INAUTO_IMAGE_ROLE:-<unset>}')"
             exit 1
             ;;
     esac
@@ -147,22 +158,31 @@ function check_config() {
         esac
     fi
 
+    TARGET_PROFILE="${TARGET_PROFILE:-${TARGET_DISTRO:-}}"
+    export TARGET_PROFILE
+
     case "${TARGET_DISTRO:-}" in
         ubuntu|debian) ;;
         *)
             >&2 echo "ERROR: TARGET_DISTRO must be 'ubuntu' or 'debian' (got: '${TARGET_DISTRO:-<unset>}')"
+            >&2 echo "       Use TARGET_PROFILE to select a build profile, for example TARGET_PROFILE=ubuntu-installer."
             exit 1
             ;;
     esac
 
-    if [[ ! -d "$SCRIPT_DIR/profiles/$TARGET_DISTRO" ]]; then
-        >&2 echo "ERROR: profile directory missing: $SCRIPT_DIR/profiles/$TARGET_DISTRO"
+    if [[ ! "$TARGET_PROFILE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        >&2 echo "ERROR: TARGET_PROFILE contains unsupported characters: '$TARGET_PROFILE'"
+        exit 1
+    fi
+
+    if [[ ! -d "$SCRIPT_DIR/profiles/$TARGET_PROFILE" ]]; then
+        >&2 echo "ERROR: profile directory missing: $SCRIPT_DIR/profiles/$TARGET_PROFILE"
         exit 1
     fi
 }
 
 function load_profile() {
-    PROFILE_DIR="$SCRIPT_DIR/profiles/$TARGET_DISTRO"
+    PROFILE_DIR="$SCRIPT_DIR/profiles/$TARGET_PROFILE"
 
     # shellcheck source=/dev/null
     . "$PROFILE_DIR/profile.env"
@@ -176,8 +196,13 @@ function load_profile() {
         >&2 echo "ERROR: profile variable '$VERSION_VAR_NAME' or '$MIRROR_VAR_NAME' is empty"
         exit 1
     fi
+    EFI_GRUB_DIR="${EFI_GRUB_DIR:-ubuntu}"
+    if [[ ! "$EFI_GRUB_DIR" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        >&2 echo "ERROR: EFI_GRUB_DIR contains unsupported characters: '${EFI_GRUB_DIR:-}'"
+        exit 1
+    fi
 
-    export PROFILE_DIR TARGET_VERSION TARGET_MIRROR LIVE_BOOT_DIR LIVE_SQUASHFS_NAME DEBOOTSTRAP_COMPONENTS
+    export PROFILE_DIR TARGET_VERSION TARGET_MIRROR LIVE_BOOT_DIR LIVE_SQUASHFS_NAME DEBOOTSTRAP_COMPONENTS EFI_GRUB_DIR
 }
 
 function setup_host() {
@@ -190,6 +215,7 @@ function setup_host() {
 function debootstrap() {
     echo "=====> running debootstrap ... will take a couple of minutes ..."
     local extractor_args
+    local debootstrap_arch="${TARGET_ARCH:-amd64}"
     extractor_args=()
 
     if [[ -d chroot ]] && find chroot -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
@@ -209,14 +235,19 @@ function debootstrap() {
         extractor_args=(--extractor=ar)
     fi
 
+    if [[ -n "${LIVECD_APT_CACHE_DIR:-}" && -d "${LIVECD_APT_CACHE_DIR:-}" ]]; then
+        as_root mkdir -p "$LIVECD_APT_CACHE_DIR/debootstrap"
+        extractor_args+=(--cache-dir="$LIVECD_APT_CACHE_DIR/debootstrap")
+    fi
+
     if [[ ${#ROOT_CMD[@]} -eq 0 ]]; then
         command debootstrap \
             --verbose \
             "${extractor_args[@]}" \
-            --arch=amd64 \
+            --arch="$debootstrap_arch" \
             --variant=minbase \
             --components="$DEBOOTSTRAP_COMPONENTS" \
-            --include=ca-certificates \
+            --include=ca-certificates,gettext-base \
             "$TARGET_VERSION" \
             chroot \
             "$TARGET_MIRROR"
@@ -224,10 +255,10 @@ function debootstrap() {
         "${ROOT_CMD[@]}" debootstrap \
             --verbose \
             "${extractor_args[@]}" \
-            --arch=amd64 \
+            --arch="$debootstrap_arch" \
             --variant=minbase \
             --components="$DEBOOTSTRAP_COMPONENTS" \
-            --include=ca-certificates \
+            --include=ca-certificates,gettext-base \
             "$TARGET_VERSION" \
             chroot \
             "$TARGET_MIRROR"
@@ -332,6 +363,8 @@ function scan_vulnerabilities() {
 
     {
         echo "target_name=$TARGET_NAME"
+        echo "target_distro=$TARGET_DISTRO"
+        echo "target_profile=$TARGET_PROFILE"
         echo "target_version=$TARGET_VERSION"
         echo "target_mirror=$TARGET_MIRROR"
         echo "generated_at_utc=$(TZ=UTC date -Iseconds)"
@@ -412,17 +445,24 @@ function scan_vulnerabilities() {
     ' "$trivy_json_report" > "$affected_packages"
 
     jq -r '
+        def vulnerabilities:
+            [.Results[]?.Vulnerabilities[]?];
         def severity_count(level):
-            ([.Results[]?.Vulnerabilities[]? | select(.Severity == level)] | length);
+            (vulnerabilities | map(select(.Severity == level)) | length);
+        def has_fix:
+            ((.FixedVersion // "") | length) > 0;
         [
             "Report directory: '"$report_root"'",
-            "Total vulnerabilities: " + (([.Results[]?.Vulnerabilities[]?] | length) | tostring),
+            "Total vulnerabilities: " + ((vulnerabilities | length) | tostring),
             "Affected packages: " + (([.Results[]?.Vulnerabilities[]?.PkgName] | map(select(. != null)) | unique | length) | tostring),
             "CRITICAL: " + (severity_count("CRITICAL") | tostring),
             "HIGH: " + (severity_count("HIGH") | tostring),
             "MEDIUM: " + (severity_count("MEDIUM") | tostring),
             "LOW: " + (severity_count("LOW") | tostring),
-            "UNKNOWN: " + (severity_count("UNKNOWN") | tostring)
+            "UNKNOWN: " + (severity_count("UNKNOWN") | tostring),
+            "Fixed version available: " + ((vulnerabilities | map(select(has_fix)) | length) | tostring),
+            "No fixed version reported: " + ((vulnerabilities | map(select(has_fix | not)) | length) | tostring),
+            "CRITICAL/HIGH with fixed version: " + ((vulnerabilities | map(select((.Severity == "CRITICAL" or .Severity == "HIGH") and has_fix)) | length) | tostring)
         ]
         | .[]
     ' "$trivy_json_report" > "$summary_report"
@@ -437,9 +477,19 @@ function prechroot() {
 
     # Setup build scripts in chroot environment
     as_root install -m 0755 "$SCRIPT_DIR/chroot_build.sh" chroot/root/chroot_build.sh
-    as_root install -m 0644 "$SCRIPT_DIR/default_config.sh" chroot/root/default_config.sh
-    if [[ -f "$SCRIPT_DIR/config.sh" ]]; then
+    if [[ "${INAUTO_IMAGE_ROLE:-panel}" == "factory-installer" && -f "$SCRIPT_DIR/config-installer.sh" ]]; then
+        as_root install -m 0644 "$SCRIPT_DIR/config-installer.sh" chroot/root/config.sh
+    elif [[ -f "$SCRIPT_DIR/config.sh" ]]; then
         as_root install -m 0644 "$SCRIPT_DIR/config.sh" chroot/root/config.sh
+    fi
+    as_root install -m 0755 "$SCRIPT_DIR/targets/rauc/install-rauc-source.sh" \
+        chroot/root/install-rauc-source.sh
+
+    # Keep DNS inside the chroot aligned with the builder container. This is
+    # especially important when Docker uses host networking or custom DNS.
+    if [[ -f /etc/resolv.conf ]]; then
+        as_root rm -f chroot/etc/resolv.conf
+        as_root install -m 0644 /etc/resolv.conf chroot/etc/resolv.conf
     fi
 
     # Install profile files inside chroot for chroot_build.sh to consume.
@@ -480,6 +530,11 @@ function prechroot() {
 
 }
 
+function ensure_chroot_build_helpers() {
+    as_root install -m 0755 "$SCRIPT_DIR/targets/rauc/install-rauc-source.sh" \
+        chroot/root/install-rauc-source.sh
+}
+
 # function run_chroot() {
 
 #     # Launch into chroot environment to build install image.
@@ -492,16 +547,24 @@ function prechroot() {
 # они просто игнорируются конфигом.
 function invoke_chroot_stage() {
     local stage="$1"
+    ensure_chroot_build_helpers
     as_root chroot chroot /usr/bin/env \
         "DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive}" \
+        "TARGET_DISTRO=${TARGET_DISTRO:-}" \
+        "TARGET_PROFILE=${TARGET_PROFILE:-${TARGET_DISTRO:-}}" \
+        "TARGET_NAME=${TARGET_NAME:-}" \
         "TARGET_FORMAT=${TARGET_FORMAT:-iso}" \
+        "INAUTO_IMAGE_ROLE=${INAUTO_IMAGE_ROLE:-panel}" \
         "TARGET_PLATFORM=${TARGET_PLATFORM:-}" \
         "TARGET_ARCH=${TARGET_ARCH:-}" \
         "RAUC_BUNDLE_VERSION=${RAUC_BUNDLE_VERSION:-}" \
+        "RAUC_PINNED_VERSION=${RAUC_PINNED_VERSION:-1.15.2}" \
+        "RAUC_COMPATIBLE_VERSION=${RAUC_COMPATIBLE_VERSION:-v1}" \
         "INAUTO_OVERLAY_SIZE=${INAUTO_OVERLAY_SIZE:-2G}" \
         "INAUTO_SITE_CONFIG_DIR=${INAUTO_SITE_CONFIG_DIR:-/home/inauto/config}" \
         "INAUTO_AUTOSTART_SCRIPT=${INAUTO_AUTOSTART_SCRIPT:-/home/inauto/on_login}" \
         "INAUTO_JOURNAL_DIR=${INAUTO_JOURNAL_DIR:-/home/inauto/log/journal}" \
+        "LIVECD_KEEP_APT_CACHE=${LIVECD_KEEP_APT_CACHE:-1}" \
         /root/chroot_build.sh "$stage"
 }
 
@@ -536,7 +599,6 @@ function chr_finish_up() {
 function postchroot() {
        # Cleanup after image changes
     as_root rm -f chroot/root/chroot_build.sh
-    as_root rm -f chroot/root/default_config.sh
     if [[ -f "chroot/root/config.sh" ]]; then
         as_root rm -f chroot/root/config.sh
     fi
@@ -575,6 +637,10 @@ function build_iso() {
         echo "=====> TARGET_FORMAT=rauc: squashfs готов, ISO-packaging пропущен (см. build_rauc_bundle)"
         return 0
     fi
+    if [[ "${INAUTO_IMAGE_ROLE:-panel}" == "factory-installer" ]]; then
+        echo "=====> INAUTO_IMAGE_ROLE=factory-installer: plain ISO-packaging пропущен (см. build_rauc_installer_iso)"
+        return 0
+    fi
 
     echo "=====> running build_iso (xorriso) ..."
 
@@ -610,7 +676,7 @@ function build_iso() {
          "/EFI/boot/bootx64.efi=isolinux/bootx64.efi" \
          "/EFI/boot/mmx64.efi=isolinux/mmx64.efi" \
          "/EFI/boot/grubx64.efi=isolinux/grubx64.efi" \
-         "/EFI/$TARGET_DISTRO/grub.cfg=isolinux/grub.cfg" \
+         "/EFI/${EFI_GRUB_DIR:-ubuntu}/grub.cfg=isolinux/grub.cfg" \
          "/isolinux/bios.img=isolinux/bios.img" \
          "/isolinux/efiboot.img=isolinux/efiboot.img" \
          "."
@@ -633,13 +699,14 @@ function build_rauc_bundle() {
 
     export TARGET_DISTRO TARGET_FORMAT TARGET_PLATFORM TARGET_ARCH \
         RAUC_BUNDLE_VERSION RAUC_SIGNING_CERT RAUC_SIGNING_KEY \
-        RAUC_INTERMEDIATE_CERT RAUC_VERSION_MODE
+        RAUC_INTERMEDIATE_CERT RAUC_VERSION_MODE RAUC_COMPATIBLE_VERSION
 
     as_root env \
         "TARGET_DISTRO=${TARGET_DISTRO:-}" \
         "TARGET_FORMAT=${TARGET_FORMAT:-}" \
         "TARGET_PLATFORM=${TARGET_PLATFORM:-}" \
         "TARGET_ARCH=${TARGET_ARCH:-}" \
+        "RAUC_COMPATIBLE_VERSION=${RAUC_COMPATIBLE_VERSION:-v1}" \
         "RAUC_BUNDLE_VERSION=${RAUC_BUNDLE_VERSION:-}" \
         "RAUC_SIGNING_CERT=${RAUC_SIGNING_CERT:-}" \
         "RAUC_SIGNING_KEY=${RAUC_SIGNING_KEY:-}" \
@@ -664,16 +731,103 @@ function build_installer_image() {
         "TARGET_FORMAT=${TARGET_FORMAT:-}" \
         "TARGET_PLATFORM=${TARGET_PLATFORM:-}" \
         "TARGET_ARCH=${TARGET_ARCH:-}" \
+        "RAUC_COMPATIBLE_VERSION=${RAUC_COMPATIBLE_VERSION:-v1}" \
         "RAUC_BUNDLE_VERSION=${RAUC_BUNDLE_VERSION:-}" \
         "RAUC_VERSION_MODE=${RAUC_VERSION_MODE:-release}" \
         "INSTALLER_KEYRING_SRC=${INSTALLER_KEYRING_SRC:-}" \
         "$SCRIPT_DIR/targets/rauc/build-installer-image.sh"
 }
 
+# Собирает bootable USB ISO для factory provisioning RAUC target'а.
+# Запускается только во второй фазе сборки: INAUTO_IMAGE_ROLE=factory-installer.
+# ISO использует отдельную live image/ директорию installer'а и кладёт рядом
+# RAUC installer payload из repo-root out/.
+function build_rauc_installer_iso() {
+    if [[ "${INAUTO_IMAGE_ROLE:-panel}" != "factory-installer" ]]; then
+        return 0
+    fi
+
+    echo "=====> running build_rauc_installer_iso ..."
+
+    local artifact_base
+    local out_dir
+    local payload_tar
+    local installer_iso
+
+    artifact_base="inauto-panel-installer-${TARGET_DISTRO}-${TARGET_ARCH}-${TARGET_PLATFORM}-${RAUC_BUNDLE_VERSION}"
+    out_dir="$(dirname "$SCRIPT_DIR")/out"
+    payload_tar="$out_dir/${artifact_base}.tar.zst"
+    installer_iso="$out_dir/${artifact_base}.iso"
+
+    [[ -f "$payload_tar" ]] || {
+        >&2 echo "ERROR: installer payload not found: $payload_tar"
+        return 1
+    }
+    [[ -d "$SCRIPT_DIR/image" ]] || {
+        >&2 echo "ERROR: live image directory not found: $SCRIPT_DIR/image"
+        return 1
+    }
+
+    as_root rm -rf "$SCRIPT_DIR/image/inauto-installer"
+    as_root tar -I zstd -xf "$payload_tar" -C "$SCRIPT_DIR/image"
+    as_root tee "$SCRIPT_DIR/image/inauto-installer/Inauto Panel Installer.desktop" >/dev/null <<'EOF_INSTALLER_DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Inauto Panel Installer
+Comment=Install Inauto panel firmware
+Exec=/usr/local/sbin/inauto-factory-installer-autostart
+Terminal=false
+Categories=System;
+EOF_INSTALLER_DESKTOP
+    as_root chmod 0755 "$SCRIPT_DIR/image/inauto-installer/Inauto Panel Installer.desktop"
+
+    pushd "$SCRIPT_DIR/image"
+
+    as_root xorriso \
+        -as mkisofs \
+        -iso-level 3 \
+        -full-iso9660-filenames \
+        -J -J -joliet-long \
+        -volid "INAUTO_INSTALLER" \
+        -output "$installer_iso" \
+      -eltorito-boot isolinux/bios.img \
+        -no-emul-boot \
+        -boot-load-size 4 \
+        -boot-info-table \
+        --eltorito-catalog boot.catalog \
+        --grub2-boot-info \
+        --grub2-mbr ../chroot/usr/lib/grub/i386-pc/boot_hybrid.img \
+        -partition_offset 16 \
+        --mbr-force-bootable \
+      -eltorito-alt-boot \
+        -no-emul-boot \
+        -e isolinux/efiboot.img \
+        -append_partition 2 28732ac11ff8d211ba4b00a0c93ec93b isolinux/efiboot.img \
+        -appended_part_as_gpt \
+        -iso_mbr_part_type a2a0d0ebe5b9334487c068b6b72699c7 \
+        -m "isolinux/efiboot.img" \
+        -m "isolinux/bios.img" \
+        -e '--interval:appended_partition_2:::' \
+      -exclude isolinux \
+      -graft-points \
+         "/EFI/boot/bootx64.efi=isolinux/bootx64.efi" \
+         "/EFI/boot/mmx64.efi=isolinux/mmx64.efi" \
+         "/EFI/boot/grubx64.efi=isolinux/grubx64.efi" \
+         "/EFI/${EFI_GRUB_DIR:-ubuntu}/grub.cfg=isolinux/grub.cfg" \
+         "/isolinux/bios.img=isolinux/bios.img" \
+         "/isolinux/efiboot.img=isolinux/efiboot.img" \
+         "."
+
+    popd
+
+    (cd "$out_dir" && sha256sum "${artifact_base}.iso" > "${artifact_base}.iso.sha256")
+    echo "=====> RAUC installer ISO готов: $installer_iso"
+}
+
 # =============   main  ================
 
 # we always stay in $SCRIPT_DIR
-cd $SCRIPT_DIR
+cd "$SCRIPT_DIR"
 
 load_config
 check_config
@@ -681,27 +835,30 @@ load_profile
 check_host
 
 # check number of args
-if [[ $# == 0 || $# > 3 ]]; then help; fi
+if (( $# == 0 || $# > 3 )); then help; fi
 
 # loop through args
 dash_flag=false
 start_index=0
 end_index=${#CMD[*]}
+cmd_index=0
 for ii in "$@";
 do
     if [[ $ii == "-" ]]; then
         dash_flag=true
         continue
     fi
-    find_index $ii
+    if ! cmd_index="$(find_index "$ii")"; then
+        help "Command not found : $ii"
+    fi
     if [[ $dash_flag == false ]]; then
-        start_index=$index
+        start_index=$cmd_index
     else
-        end_index=$(($index+1))
+        end_index=$((cmd_index + 1))
     fi
 done
 if [[ $dash_flag == false ]]; then
-    end_index=$(($start_index + 1))
+    end_index=$((start_index + 1))
 fi
 
 #loop through the commands

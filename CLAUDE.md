@@ -34,6 +34,12 @@ REBUILD_BUILDER=1 ./scripts/build-in-docker.sh -
 ./scripts/build-in-docker.sh chr_install_pkg - chr_build_image
 ```
 
+```bash
+# Двухфазная сборка RAUC bundle + factory installer ISO (всё вместе)
+RAUC_BUNDLE_VERSION=<version> ./scripts/build-rauc-installer.sh
+RAUC_BUNDLE_VERSION=<version> ./scripts/build-rauc-installer.sh --clean-cache
+```
+
 Для сборки на Windows/macOS/arm64-хостах оставляйте `BUILDER_PLATFORM=linux/amd64` (по умолчанию). Ключ `-` в `build.sh` означает «запустить все этапы от предыдущего до следующего аргумента включительно».
 
 **ВАЖНО:** прошлый коммит в истории (`b83a406`) специально отмечает, что для надёжной сборки образа нужно запускать сборку именно через эту команду (а не `build.sh` напрямую на хосте).
@@ -96,16 +102,19 @@ setup_host -> debootstrap -> prechroot
 
 Контейнер запускается с `--privileged` — это нужно для bind-mounts `/dev` и `/run` в chroot.
 
-### Конфигурация: `config.sh` перекрывает `default_config.sh`
+### Конфигурация
 
-`build.sh::load_config()` загружает `scripts/config.sh`, если файл существует; иначе падает на `scripts/default_config.sh`. **Версия конфига проверяется** (`CONFIG_FILE_VERSION`, сейчас `"0.6"`) — при подъёме обязательно обновлять и локальный `config.sh`.
+`build.sh::load_config()` загружает **`scripts/config.sh`** — файл обязателен, без него сборка упадёт с ошибкой. `default_config.sh` удалён: он был артефактом форка upstream и вводил в заблуждение. Конфиг в репозитории — единственный и финальный.
 
-Ключевые переменные конфигурации (определены в `default_config.sh`):
+**Версия конфига проверяется** (`CONFIG_FILE_VERSION`, сейчас `"0.6"`) — при добавлении новых полей обязательно поднимать версию и обновлять проверку в `build.sh::check_config()`.
+
+Ключевые переменные конфигурации (определены в `scripts/config.sh`):
 - `TARGET_UBUNTU_VERSION` (например, `noble`), `TARGET_UBUNTU_MIRROR`, `TARGET_NAME`;
-- параметры админского пользователя и VNC-пароля;
-- список устанавливаемых пакетов и хуки кастомизации.
+- `TARGET_DISTRO` (`ubuntu` | `debian`) — дистрибутив для debootstrap;
+- `TARGET_PROFILE` — директория профиля в `scripts/profiles/`; по умолчанию равен `TARGET_DISTRO`; можно задать независимо (например, `ubuntu-installer` для заводского установщика);
+- параметры пользователя, VNC-пароль, Docker-пути, RAUC-переменные.
 
-При модификации сборки **правьте `config.sh` (override)**, а не `default_config.sh`, если нужна локальная настройка, которая не должна попасть всем потребителям дефолтов.
+Для заводского образа-инсталлятора используется **`scripts/config-installer.sh`** — он копируется в chroot вместо `config.sh` при `INAUTO_IMAGE_ROLE=factory-installer`. Содержит собственные `customize_image()` и `custom_conf()` (XFCE + installer launcher, без Docker/VNC/RAUC-target).
 
 ### Цели сборки: `TARGET_FORMAT`
 
@@ -126,9 +135,9 @@ setup_host -> debootstrap -> prechroot
 
 ### Профили дистрибутивов
 
-Distro-specific логика изолирована в `scripts/profiles/<name>/` (`ubuntu/` и `debian/`). Каждый профиль содержит: `profile.env`, `sources.list.template`, `live-packages.list`, `hooks.sh` (4 функции: `profile_install_live_stack`, `profile_kernel_install`, `profile_write_image_marker`, `profile_write_boot_configs`), `iso-layout/{grub,isolinux}.cfg.template`. Общий код (`build.sh`, `chroot_build.sh`) distro-agnostic: читает профиль и дёргает хуки.
+Distro-specific логика изолирована в `scripts/profiles/<name>/`. Существующие профили: `ubuntu/`, `debian/`, `ubuntu-installer/`. Каждый профиль содержит: `profile.env`, `sources.list.template`, `live-packages.list`, `hooks.sh` (4 функции: `profile_install_live_stack`, `profile_kernel_install`, `profile_write_image_marker`, `profile_write_boot_configs`), `iso-layout/{grub,isolinux}.cfg.template`. Общий код (`build.sh`, `chroot_build.sh`) distro-agnostic: читает профиль и дёргает хуки.
 
-Переключатель — `TARGET_DISTRO=ubuntu|debian` в `scripts/config.sh` или окружении. Под каждый дистрибутив собирается отдельный builder-образ `livecd-builder-${TARGET_DISTRO}:local` из одного `docker/Builder.Dockerfile` (`ARG BASE_IMAGE`).
+Переключатель дистрибутива — `TARGET_DISTRO=ubuntu|debian`. Переключатель профиля — `TARGET_PROFILE` (по умолчанию = `TARGET_DISTRO`). При `TARGET_DISTRO=ubuntu TARGET_PROFILE=ubuntu-installer` используется профиль инсталлятора с базой Ubuntu. Builder-образ именуется `livecd-builder-${TARGET_DISTRO}:local` из одного `docker/Builder.Dockerfile` (`ARG BASE_IMAGE`).
 
 ### Артефакты и выходные файлы
 
@@ -139,23 +148,35 @@ Distro-specific логика изолирована в `scripts/profiles/<name>/
 
 ## Что модифицируется в собранном образе
 
-В `chroot_build.sh` настраиваются (ключевые блоки):
-- **LightDM + автологин** — юзер логинится автоматически, UI запускается сразу;
+### Панельный образ (`INAUTO_IMAGE_ROLE=panel`, через `config.sh`)
+
+Рабочий стол — **XFCE**. Настраиваются (ключевые блоки):
+- **LightDM + автологин** — юзер (`ubuntu`) логинится автоматически, XFCE-сессия стартует сразу;
 - **`x11vnc`** — systemd-юнит `x11vnc.service`, пароль хранится в `/etc/x11vnc.pass`, работает поверх дисплея `:0` LightDM'а;
-- **Docker + compose-восстановление** — в образ ставится Docker; при старте системы отдельный systemd-сервис через helper-скрипт находит compose-проекты (по label `com.docker.compose.project`) и делает `docker compose up -d` для каждого, если все указанные compose-файлы доступны;
-- **NetworkManager** с renderer'ом `ifupdown`/`keyfile`, `dns=systemd-resolved`;
-- **SSH** — включён по конфигу;
-- **CA-bundle хоста** — копируется в `chroot/usr/local/share/ca-certificates/inauto-host-ca.crt` и регистрируется через `update-ca-certificates` (нужно в корпсетях с self-signed прокси).
+- **Docker + compose-восстановление** — ставится Docker Engine; при старте systemd-сервис `DockerComposeRestore.service` поднимает compose-проекты по label `com.docker.compose.project`;
+- **NetworkManager** с renderer'ом netplan;
+- **SSH** — включён; только pubkey-аутентификация;
+- **CA-bundle хоста** — копируется в `chroot/usr/local/share/ca-certificates/inauto-host-ca.crt` и регистрируется через `update-ca-certificates` (нужно в корпсетях с self-signed прокси);
+- **RAUC target** (при `TARGET_FORMAT=rauc`) — system.conf, keyring, initramfs-hook, update-agent, watchdog, mark-good.
+
+### Заводской инсталлятор (`INAUTO_IMAGE_ROLE=factory-installer`, через `config-installer.sh`)
+
+Рабочий стол — **XFCE** (минимальный набор). Настраиваются:
+- LightDM + автологин (`ubuntu`), XFCE-сессия;
+- RAUC версии `RAUC_PINNED_VERSION` (собирается из исходников скриптом `install-rauc-source.sh`);
+- overlay/squashfs вписываются в `/etc/initramfs-tools/modules` + пересборка initramfs (нужно для casper COW);
+- `inauto-factory-installer-autostart` — XDG autostart + ярлык на рабочем столе; запускает `START-INSTALLER.sh` с USB/cdrom;
+- locale/keyboard, NetworkManager.
 
 ## CI
 
-В `.github/workflows/` лежат воркфлоу `build-bionic.yml`, `build-focal.yml`, `build-jammy.yml`, `build-noble.yml` — собирают ISO под соответствующие релизы Ubuntu. Основная рабочая ветка для noble — та, что в локальной сборке.
+В `.github/workflows/` лежат воркфлоу `build-bionic.yml`, `build-focal.yml`, `build-jammy.yml`, `build-noble.yml` — legacy-конвейеры из форка upstream. Для текущей ветки `feature/immutable-firmware` актуальна только сборка noble; остальные не адаптированы под `TARGET_FORMAT=rauc`, `TARGET_PROFILE` и `build-rauc-installer.sh`.
 
 ## Правила при изменении кода
 
 1. **Идиомы bash.** Все скрипты написаны с `set -euo pipefail` (либо эквивалентом) и кавычат переменные — сохраняйте это. Проверяйте `shellcheck`, если он доступен.
 2. **Не ломайте идемпотентность.** Каждый этап `build.sh` должен переживать повторный запуск. Например, в `enable_vnc()` пароль пишется, только если файла ещё нет.
 3. **Этапы `chr_*` запускаются внутри chroot** — в них недоступны хостовые пути и нельзя полагаться на хостовые переменные окружения, кроме тех, что проброшены через `/usr/bin/env`.
-4. **Секреты.** Пароли (админ, VNC) берутся из `config.sh`/`default_config.sh`. Не хардкодьте новые пароли в местах, где их нельзя перекрыть локальным `config.sh`.
+4. **Секреты.** Пароли (VNC и т.п.) берутся из `config.sh`. Не хардкодьте новые секреты напрямую в скриптах — выносите в переменные `config.sh`.
 5. **Комментарии и сообщения.** Логи/комментарии — на русском (как в остальном проекте автора); имена переменных и функций — на английском snake_case.
-6. **Версия конфига.** Если меняете поля в `default_config.sh` — поднимайте `CONFIG_FILE_VERSION` и обновляйте проверку в `build.sh::check_config()`.
+6. **Версия конфига.** Если добавляете или меняете поля в `config.sh` — поднимайте `CONFIG_FILE_VERSION` и обновляйте проверку в `build.sh::check_config()`. То же самое для `config-installer.sh`.

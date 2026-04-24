@@ -1,5 +1,5 @@
 #!/bin/bash
-# Ubuntu profile hooks.
+# Ubuntu installer profile hooks.
 
 # CHROOT: install live-stack packages from live-packages.list.
 function profile_install_live_stack() {
@@ -55,7 +55,7 @@ EOF
         fi
     fi
 
-    if ! ls /boot/vmlinuz-* >/dev/null 2>&1; then
+    if ! compgen -G "/boot/vmlinuz-*" >/dev/null; then
         concrete_virtual=$(apt-cache search '^linux-image-[0-9].*-virtual$' \
             | awk '{print $1}' | sort -Vr | head -n1 || true)
         if [[ -n "$concrete_virtual" ]]; then
@@ -65,22 +65,22 @@ EOF
         try_install_kernel_pkg linux-image-virtual || true
     fi
 
-    if ! ls /boot/vmlinuz-* >/dev/null 2>&1; then
+    if ! compgen -G "/boot/vmlinuz-*" >/dev/null; then
         >&2 echo "ERROR: unable to install a bootable kernel package"
         return 1
     fi
 }
 
 # CHROOT: write marker file used by GRUB `search --file`.
-# For Ubuntu: /image/ubuntu (empty file at image root).
 function profile_write_image_marker() {
     touch /image/ubuntu
 }
 
 # CHROOT: render isolinux/grub.cfg and isolinux/isolinux.cfg from templates.
-# Restricted envsubst variable list preserves $grub_platform in the template.
+# Installer uses the simplest live-boot args we can get away with:
+# no persistence, no prompt, and no toram copy.
 function profile_write_boot_configs() {
-    local live_boot_args="systemd.mask=udisks2 nopersistent toram noprompt"
+    local live_boot_args="nopersistent noprompt"
 
     LIVE_BOOT_DIR="$LIVE_BOOT_DIR" LIVE_BOOT_ARGS="$live_boot_args" \
         envsubst '$LIVE_BOOT_DIR $LIVE_BOOT_ARGS' \

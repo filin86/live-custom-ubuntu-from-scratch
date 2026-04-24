@@ -4,7 +4,7 @@
 #
 # Output:
 #   dev-root-ca.key / dev-root-ca.crt  — dev root CA (10 лет)
-#   dev-signing.key / dev-signing.crt  — dev signing cert (1 год, подписан dev-root-ca)
+#   dev-signing.key / dev-signing.crt  — dev signing cert (1 год, подписан dev-root-ca; только dev)
 #   dev-keyring.pem                     — root CA в формате keyring для RAUC
 
 set -euo pipefail
@@ -41,7 +41,9 @@ openssl req -newkey rsa:$RSA_BITS -nodes \
     -subj "/CN=$ORG Signing/O=$ORG"
 
 EXTFILE="./dev-signing.ext"
-printf "keyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning\n" > "$EXTFILE"
+# RAUC 1.11 verifies CMS signatures with OpenSSL's smimesign purpose.
+# Keep codeSigning and add emailProtection so local dev bundles verify on Ubuntu Noble.
+printf "keyUsage=critical,digitalSignature\nextendedKeyUsage=emailProtection,codeSigning\n" > "$EXTFILE"
 
 openssl x509 -req -in dev-signing.csr \
     -CA dev-root-ca.crt -CAkey dev-root-ca.key -CAcreateserial \

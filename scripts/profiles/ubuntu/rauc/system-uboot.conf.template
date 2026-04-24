@@ -1,5 +1,5 @@
 [system]
-compatible=inauto-panel-@DISTRO@-@ARCH@-@PLATFORM@-v1
+compatible=@COMPATIBLE@
 bootloader=uboot
 data-directory=/var/lib/rauc
 bundle-formats=-plain

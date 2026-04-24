@@ -27,15 +27,11 @@ fail() {
 
 # Загружает основные build-переменные репозитория.
 load_repo_config() {
-    if [[ -f "$SCRIPTS_ROOT/config.sh" ]]; then
-        # shellcheck source=/dev/null
-        . "$SCRIPTS_ROOT/config.sh"
-    elif [[ -f "$SCRIPTS_ROOT/default_config.sh" ]]; then
-        # shellcheck source=/dev/null
-        . "$SCRIPTS_ROOT/default_config.sh"
-    else
-        fail "Не найден ни scripts/config.sh, ни scripts/default_config.sh."
+    if [[ ! -f "$SCRIPTS_ROOT/config.sh" ]]; then
+        fail "Не найден scripts/config.sh."
     fi
+    # shellcheck source=/dev/null
+    . "$SCRIPTS_ROOT/config.sh"
 }
 
 # Загружает distro-profile (ubuntu/debian) с переменными LIVE_BOOT_DIR и т.п.
@@ -58,11 +54,14 @@ require_rauc_vars() {
 }
 
 # Возвращает compatible-строку для текущего target'а.
-# Формат: inauto-panel-<distro>-<arch>-<platform>-v1.
+# Формат: inauto-panel-<distro>-<arch>-<platform>-<RAUC_COMPATIBLE_VERSION>.
 compatible() {
     require_rauc_vars
-    printf 'inauto-panel-%s-%s-%s-v1\n' \
-        "$TARGET_DISTRO" "$TARGET_ARCH" "$TARGET_PLATFORM"
+    local compatible_version="${RAUC_COMPATIBLE_VERSION:-v1}"
+    [[ "$compatible_version" =~ ^v[0-9]+$ ]] \
+        || fail "RAUC_COMPATIBLE_VERSION должен иметь формат v<N>, получено '$compatible_version'"
+    printf 'inauto-panel-%s-%s-%s-%s\n' \
+        "$TARGET_DISTRO" "$TARGET_ARCH" "$TARGET_PLATFORM" "$compatible_version"
 }
 
 # Возвращает имя RAUC bundle-артефакта для текущего target'а и версии.

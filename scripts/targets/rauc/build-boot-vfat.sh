@@ -6,7 +6,8 @@
 # Для pc-efi создаётся FAT32 образ фиксированного размера
 # (EFI_VFAT_SIZE_MIB, по умолчанию 512 MiB — соответствует efi_A/efi_B на диске)
 # с двумя файлами:
-#   \EFI\Linux\inauto-panel.efi   — EFI-stub kernel (copy LIVE_KERNEL_NAME)
+#   \EFI\BOOT\BOOTX64.EFI         — EFI-stub kernel (copy LIVE_KERNEL_NAME)
+#   \EFI\Linux\inauto-panel.efi   — compatibility copy for older bundles
 #   \EFI\Linux\initrd.img         — external initrd (copy LIVE_INITRD_NAME)
 #
 # Никаких loop mount'ов: всё через mkfs.vfat + mtools (работает без root).
@@ -37,19 +38,20 @@ done
 
 # Gate: pinned RAUC принимает efi-loader/efi-cmdline в [slot.efi.*]?
 # Поля документированы начиная с RAUC 1.10 (EFI backend refactor).
-# Spec задаёт минимум 1.13 в production.
+# Production-сборка pin'ит актуальную RAUC-версию через RAUC_PINNED_VERSION.
 rauc_version="$(rauc --version 2>/dev/null | awk 'NR==1{print $NF}' || true)"
 if [[ -z "$rauc_version" || ! "$rauc_version" =~ ^([0-9]+)\.([0-9]+) ]]; then
-    fail "не удалось определить версию RAUC; установите пакет rauc >= 1.13."
+    fail "не удалось определить версию RAUC; установите пакет rauc >= 1.10."
 fi
 rauc_major="${BASH_REMATCH[1]}"
 rauc_minor="${BASH_REMATCH[2]}"
 
 if (( rauc_major < 1 )) || { (( rauc_major == 1 )) && (( rauc_minor < 10 )); }; then
-    fail "RAUC ${rauc_version} слишком стар: efi-loader/efi-cmdline требуют минимум 1.10 (spec: 1.13)."
+    fail "RAUC ${rauc_version} слишком стар: efi-loader/efi-cmdline требуют минимум 1.10."
 fi
-if (( rauc_major == 1 )) && (( rauc_minor < 13 )); then
-    log "WARNING: RAUC ${rauc_version} ниже spec-minimum 1.13. Перед production обновите pinned-версию."
+if command -v dpkg >/dev/null 2>&1 \
+        && ! dpkg --compare-versions "$rauc_version" ge "${RAUC_PINNED_VERSION:-1.15.2}"; then
+    log "WARNING: RAUC ${rauc_version} ниже pinned ${RAUC_PINNED_VERSION:-1.15.2}. Перед production обновите pinned-версию."
 fi
 
 case "${TARGET_PLATFORM}" in
@@ -78,9 +80,11 @@ truncate -s "${EFI_VFAT_SIZE_MIB}M" "$OUT_FILE"
 mkfs.vfat -F 32 -n "$LABEL" "$OUT_FILE" >/dev/null
 
 log "размещаю EFI-stub kernel + initrd в FAT32"
-mmd -i "$OUT_FILE" ::/EFI ::/EFI/Linux
+mmd -i "$OUT_FILE" ::/EFI ::/EFI/Linux ::/EFI/BOOT
+mcopy -i "$OUT_FILE" "$KERNEL_SRC" "::/EFI/BOOT/BOOTX64.EFI"
 mcopy -i "$OUT_FILE" "$KERNEL_SRC" "::/EFI/Linux/inauto-panel.efi"
 mcopy -i "$OUT_FILE" "$INITRD_SRC" "::/EFI/Linux/initrd.img"
 
 log "готово: $OUT_FILE"
+mdir -i "$OUT_FILE" "::/EFI/BOOT"
 mdir -i "$OUT_FILE" "::/EFI/Linux"

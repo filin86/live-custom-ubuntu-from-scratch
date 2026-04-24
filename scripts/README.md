@@ -60,8 +60,7 @@ BUILDER_PLATFORM=linux/amd64 ./build-in-docker.sh -
 
 ## Как настраивать сборку
 
-1. Скопируйте файл `default_config.sh` в `config.sh` внутри каталога `scripts`.
-2. Внесите нужные изменения в `config.sh`; при запуске скрипт автоматически выберет его вместо `default_config.sh`.
+Основной конфиг сборки — `scripts/config.sh`. Файл обязателен: `build.sh` завершается с ошибкой, если он отсутствует. `default_config.sh` удалён — при необходимости создайте `config.sh` вручную или скопируйте из любого существующего окружения.
 
 ## Профиль среды XFCE (для `config.sh` этого репозитория)
 
@@ -118,7 +117,7 @@ BUILDER_PLATFORM=linux/amd64 ./build-in-docker.sh -
 
 ## Как обновлять конфигурацию
 
-Файл конфигурации версионируется через переменную `CONFIG_FILE_VERSION`. Если в `default_config.sh` меняется формат конфигурации, это значение увеличивается. После этого `config.sh` нужно вручную обновить на основе нового `default_config.sh`, чтобы новые или измененные переменные получили нужные значения. После завершения такого обновления значение `CONFIG_FILE_VERSION` в `config.sh` должно совпадать с версией в файле по умолчанию, иначе сборка не запустится.
+Файл конфигурации версионируется через переменную `CONFIG_FILE_VERSION` (сейчас `"0.6"`). При добавлении или изменении переменных версия поднимается вручную, а `build.sh::check_config()` обновляется соответственно — иначе сборка не запустится.
 
 ## Immutable firmware target (RAUC)
 
@@ -132,7 +131,7 @@ TARGET_FORMAT=rauc TARGET_PLATFORM=pc-efi ./build-in-docker.sh -
 
 После фаз 0–4 включительно доступна полная сборка `.raucb` bundle'а: `build_iso` останавливается после `mksquashfs` при `TARGET_FORMAT=rauc`, затем отдельный stage `build_rauc_bundle` собирает `efi.vfat` (kernel + initrd) и подписывает bundle ключами из `RAUC_SIGNING_CERT`/`RAUC_SIGNING_KEY` (по умолчанию dev-ключи из `pki/`). Готовый артефакт лежит в `out/inauto-panel-<distro>-<arch>-pc-efi-<version>.raucb`.
 
-Ключевые RAUC-переменные (см. `default_config.sh`):
+Ключевые RAUC-переменные (см. `config.sh`):
 
 - `TARGET_PLATFORM=pc-efi` — UEFI PC (MVP); `<board>-uboot` — планшет.
 - `TARGET_ARCH=amd64` — информационно.

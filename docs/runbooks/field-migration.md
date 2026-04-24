@@ -75,6 +75,7 @@ installer его использует для автодетекта.
    ```
    Иначе — default `/tmp/inauto-backup` (tmpfs, живёт в RAM live-session).
 4. Запустить `install-to-disk.sh` с `TARGET_DEVICE=/dev/<внутренний_диск>`.
+   Скрипт покажет выбранный диск и продолжит только после ввода `yes`.
 
 Installer выполнит (в строгом порядке):
 - **Backup** — `backup-restore-home.sh backup` сканирует
@@ -144,10 +145,8 @@ ssh engineer@laptop 'du -sh /backup/panels/<serial>/home-inauto/'
 Затем запустить installer **без** backup-шага:
 
 ```bash
-BACKUP_DIR=/dev/null /opt/inauto-installer/install-to-disk.sh
-# (`find_home_inauto_device` найдёт /home/inauto, но запись архива
-#  в /dev/null даст ошибку и backup пропустится — это приемлемо,
-#  т.к. mы уже сохранили данные rsync'ом.)
+SKIP_BACKUP=1 /opt/inauto-installer/install-to-disk.sh
+# Installer всё равно попросит подтвердить стирание выбранного диска вводом `yes`.
 ```
 
 После reboot'а restore'ить данные rsync'ом обратно:

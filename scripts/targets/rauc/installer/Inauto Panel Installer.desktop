@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Inauto Panel Installer
+Comment=Install Inauto panel firmware
+Exec=/opt/inauto-installer/START-INSTALLER.sh
+Terminal=false
+Categories=System;
