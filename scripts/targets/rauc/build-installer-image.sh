@@ -138,13 +138,14 @@ Inauto panel immutable firmware installer payload.
 Автоматический backup + restore /home/inauto:
   Installer сам ищет существующее /home/inauto с .inautolock на
   non-removable устройствах до разметки TARGET_DEVICE, архивирует его
-  ДО разметки диска и распаковывает в /home/inauto/backup/ ПОСЛЕ
-  установки. Skeleton (/home/inauto/{.inautolock,on_start,on_login,
-  staff,log}) при этом НЕ перезаписывается.
+  ДО разметки диска, исключая /home/inauto/staff/docker, и распаковывает
+  прямо в /home/inauto/ ПОСЛЕ установки. Skeleton
+  (/home/inauto/{.inautolock,on_start,on_login,staff,log}) создаётся
+  заранее, а backup дополняет его сохранёнными файлами.
 
   Если backup слишком большой для tmpfs — переопределите BACKUP_DIR
-  на внешний USB. После reboot backup живёт только в /home/inauto/backup
-  (tmpfs исчезает).
+  на внешний USB. Если BACKUP_DIR был в /tmp, то после reboot tarball
+  исчезнет вместе с tmpfs; восстановленные данные останутся в /home/inauto.
 
 Аварийный ручной режим:
   sudo TARGET_DEVICE=/dev/sda /opt/inauto-installer/install-to-disk.sh

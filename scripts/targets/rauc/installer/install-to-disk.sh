@@ -12,7 +12,8 @@
 #     оба slot-group'а заполняются напрямую).
 #  5. Зарегистрировать UEFI boot entries system0/system1 через efibootmgr.
 #  6. Установить BootOrder=system0,system1.
-#  7. Инициализировать /persist и /home/inauto skeletons.
+#  7. Инициализировать /persist и /home/inauto skeletons, затем (если есть)
+#     восстановить backup прямо в inauto-data.
 #  8. Reboot.
 #
 # Формат payload (рядом со скриптом в /opt/inauto-installer/):
@@ -608,16 +609,16 @@ else
 
     [[ -e "$INAUTO_MNT/.inautolock" ]] || : > "$INAUTO_MNT/.inautolock"
 
-    # --- 7.5. Restore backup в /home/inauto/backup ---------------------------
-    # Архив (если есть) распаковывается в подкаталог backup/ — skeleton
-    # (.inautolock + on_start/on_login/staff/log) остаётся нетронутым.
-    # Наладчик вручную решает, что переносить из backup/ в active layout.
+    # --- 7.5. Restore backup прямо в /home/inauto ----------------------------
+    # Архив (если есть) накатывается поверх свежего skeleton'а inauto-data.
+    # staff/docker в tarball не попадает: loopback ext4 runtime-store нам
+    # здесь не нужен, container-store живёт на отдельном разделе.
 
     if [[ "${SKIP_BACKUP:-0}" == "1" ]]; then
         log "restore backup пропущен (SKIP_BACKUP=1)"
     elif [[ -x "$BACKUP_SCRIPT" ]]; then
-        log "попытка восстановить $BACKUP_DIR → $INAUTO_MNT/backup"
-        BACKUP_DIR="$BACKUP_DIR" "$BACKUP_SCRIPT" restore "$INAUTO_MNT/backup" \
+        log "попытка восстановить $BACKUP_DIR → $INAUTO_MNT"
+        BACKUP_DIR="$BACKUP_DIR" "$BACKUP_SCRIPT" restore "$INAUTO_MNT" \
             || warn "restore не выполнен; backup остаётся в $BACKUP_DIR до reboot'а"
     fi
 fi
