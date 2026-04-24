@@ -36,6 +36,9 @@
 #   SKIP_BACKUP            "1" — полностью пропустить backup/restore /home/inauto
 #   FORCE_YES              "1" — не спрашивать подтверждение перед стиранием диска
 #   DRY_RUN                "1" — не писать на диск, только показать команды (debug)
+#   PANEL_HOSTNAME         логическое имя панели; пишется в /home/inauto/staff/hostname
+#   UPDATE_CHANNEL         update-channel панели (stable/candidate)
+#   UPDATE_SERVER          URL update-server, например http://172.16.88.80:9001
 
 set -euo pipefail
 
@@ -56,6 +59,117 @@ run() {
     else
         "$@"
     fi
+}
+
+trim_ws() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s\n' "$value"
+}
+
+validate_panel_hostname() {
+    local hostname="$1"
+    [[ "$hostname" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
+normalize_update_channel() {
+    printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+validate_update_channel() {
+    local channel="$1"
+    case "$channel" in
+        stable|candidate) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+validate_update_server() {
+    local server="$1"
+    [[ "$server" =~ ^https?://[^[:space:]]+$ ]]
+}
+
+prompt_value() {
+    local label="$1"
+    local current="$2"
+    local answer
+
+    [[ -t 0 ]] || fail "$label не задан и stdin не интерактивен. Передайте env-переменную."
+
+    if [[ -n "$current" ]]; then
+        read -r -p "[installer] $label [$current]: " answer || true
+        printf '%s\n' "${answer:-$current}"
+    else
+        read -r -p "[installer] $label: " answer || true
+        printf '%s\n' "$answer"
+    fi
+}
+
+prompt_update_channel() {
+    local current="$1"
+    local answer
+
+    [[ -t 0 ]] || fail "Update channel не задан и stdin не интерактивен. Передайте env-переменную."
+
+    current="$(normalize_update_channel "${current:-stable}")"
+
+    while true; do
+        read -r -p "[installer] Update channel (stable/candidate) [$current]: " answer || true
+        answer="$(trim_ws "${answer:-$current}")"
+        answer="$(normalize_update_channel "$answer")"
+
+        if validate_update_channel "$answer"; then
+            printf '%s\n' "$answer"
+            return 0
+        fi
+
+        warn "update-channel должен быть stable или candidate."
+    done
+}
+
+serial_suffix_from_machine_id() {
+    local machine_id_file="$1"
+    local machine_id
+
+    machine_id="$(tr -d '[:space:]' < "$machine_id_file" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$machine_id" =~ ^[0-9a-f]{32}$ ]]; then
+        printf '%s-%s-%s-%s-%s\n' \
+            "${machine_id:0:8}" "${machine_id:8:4}" "${machine_id:12:4}" \
+            "${machine_id:16:4}" "${machine_id:20:12}"
+    else
+        uuidgen | tr '[:upper:]' '[:lower:]'
+    fi
+}
+
+serial_prefix_from_hostname() {
+    printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+collect_panel_settings() {
+    PANEL_HOSTNAME="$(trim_ws "${PANEL_HOSTNAME:-}")"
+    UPDATE_CHANNEL="$(normalize_update_channel "$(trim_ws "${UPDATE_CHANNEL:-}")")"
+    UPDATE_SERVER="$(trim_ws "${UPDATE_SERVER:-}")"
+
+    while [[ -z "$PANEL_HOSTNAME" ]] || ! validate_panel_hostname "$PANEL_HOSTNAME"; do
+        [[ -n "$PANEL_HOSTNAME" ]] && warn "hostname панели должен содержать только латиницу, цифры, '.', '_' или '-'."
+        PANEL_HOSTNAME="$(trim_ws "$(prompt_value "Hostname панели" "$PANEL_HOSTNAME")")"
+    done
+
+    while [[ -z "$UPDATE_CHANNEL" ]] || ! validate_update_channel "$UPDATE_CHANNEL"; do
+        [[ -n "$UPDATE_CHANNEL" ]] && warn "update-channel должен быть stable или candidate."
+        UPDATE_CHANNEL="$(prompt_update_channel "${UPDATE_CHANNEL:-stable}")"
+    done
+
+    while [[ -z "$UPDATE_SERVER" ]] || ! validate_update_server "$UPDATE_SERVER"; do
+        [[ -n "$UPDATE_SERVER" ]] && warn "адрес update-server должен начинаться с http:// или https://"
+        UPDATE_SERVER="$(trim_ws "$(prompt_value "Update server" "$UPDATE_SERVER")")"
+    done
+
+    export PANEL_HOSTNAME UPDATE_CHANNEL UPDATE_SERVER
+    log "hostname панели: $PANEL_HOSTNAME"
+    log "update channel: $UPDATE_CHANNEL"
+    log "update server: $UPDATE_SERVER"
 }
 
 # --- 1. Runtime checks ----------------------------------------------------
@@ -110,6 +224,8 @@ select_target_device() {
 TARGET_DEVICE="$(select_target_device)"
 TARGET_DEVICE="$(readlink -f "$TARGET_DEVICE")"
 log "target disk: $TARGET_DEVICE ($(blockdev --getsize64 "$TARGET_DEVICE") байт)"
+
+collect_panel_settings
 
 confirm_destructive_target() {
     local target="$1"
@@ -458,8 +574,26 @@ part_number_for_device() {
     printf '%s\n' "$part_num"
 }
 
+partuuid_for_device() {
+    local part="$1"
+    local label="${2:-}"
+    local partuuid
+
+    if is_dry_run; then
+        [[ -n "$label" ]] || return 1
+        printf 'DRYRUN-PARTUUID-%s\n' "$label"
+        return 0
+    fi
+
+    partuuid="$(blkid -s PARTUUID -o value "$part" 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ -n "$partuuid" ]] || return 1
+    printf '%s\n' "$partuuid"
+}
+
 EFI_A_PART="$(part_number_for_device "$EFI_A_DEV" efi_A)" || fail "не удалось определить partition # для efi_A"
 EFI_B_PART="$(part_number_for_device "$EFI_B_DEV" efi_B)" || fail "не удалось определить partition # для efi_B"
+ROOTFS_A_PARTUUID="$(partuuid_for_device "$ROOTFS_A_DEV" rootfs_A)" || fail "не удалось определить PARTUUID для rootfs_A"
+ROOTFS_B_PARTUUID="$(partuuid_for_device "$ROOTFS_B_DEV" rootfs_B)" || fail "не удалось определить PARTUUID для rootfs_B"
 
 log "регистрирую UEFI boot entries на $TARGET_DEVICE (efi_A=$EFI_A_PART, efi_B=$EFI_B_PART)"
 
@@ -484,13 +618,12 @@ remove_existing_entry "system0"
 remove_existing_entry "system1"
 
 LOADER_PATH='\EFI\BOOT\BOOTX64.EFI'
-# Kernel cmdline: тот же, что в system.conf:[slot.efi.N]::efi-cmdline.
-# RAUC при install перепишет entry своим (с тем же cmdline), но на factory
-# boot firmware использует ровно то, что мы положим сюда через --unicode.
-# Без этого EFI-stub kernel не нашёл бы initrd и root, и первый boot после
-# factory install'а упал бы.
-CMDLINE_A='initrd=\EFI\Linux\initrd.img rauc.slot=system0 root=/dev/disk/by-partlabel/rootfs_A rootfstype=squashfs ro quiet panic=30'
-CMDLINE_B='initrd=\EFI\Linux\initrd.img rauc.slot=system1 root=/dev/disk/by-partlabel/rootfs_B rootfstype=squashfs ro quiet panic=30'
+# EFI stub должен получить cmdline, с которым kernel может смонтировать
+# squashfs root даже если initramfs не поднялся. Поэтому root= задаём через
+# PARTUUID, а не через /dev/disk/by-partlabel/* (такие symlink'и доступны
+# только после userspace/udev).
+CMDLINE_A="initrd=\\EFI\\Linux\\initrd.img rauc.slot=system0 root=PARTUUID=${ROOTFS_A_PARTUUID} rootfstype=squashfs ro quiet panic=30"
+CMDLINE_B="initrd=\\EFI\\Linux\\initrd.img rauc.slot=system1 root=PARTUUID=${ROOTFS_B_PARTUUID} rootfstype=squashfs ro quiet panic=30"
 
 run efibootmgr \
     --create \
@@ -539,6 +672,8 @@ PERSIST_MNT="$(mktemp -d)"
 run mount "$PERSIST_DEV" "$PERSIST_MNT"
 
 init_persist_skeleton() {
+    local serial_suffix serial_prefix panel_serial
+
     install -d -m 0755 "$PERSIST_MNT/etc" "$PERSIST_MNT/etc/ssh" \
         "$PERSIST_MNT/etc/NetworkManager" \
         "$PERSIST_MNT/etc/NetworkManager/system-connections" \
@@ -574,6 +709,19 @@ init_persist_skeleton() {
         local p="$PERSIST_MNT/etc/inauto/$f"
         [[ -e "$p" ]] || : > "$p"
     done
+
+    serial_suffix="$(serial_suffix_from_machine_id "$PERSIST_MNT/etc/machine-id")"
+    serial_prefix="$(serial_prefix_from_hostname "$PANEL_HOSTNAME")"
+    panel_serial="${serial_prefix}-${serial_suffix}"
+
+    printf '%s\n' "$panel_serial" > "$PERSIST_MNT/etc/inauto/serial.txt"
+    printf '%s\n' "$UPDATE_CHANNEL" > "$PERSIST_MNT/etc/inauto/channel"
+    printf '%s\n' "$UPDATE_SERVER" > "$PERSIST_MNT/etc/inauto/update-server"
+    chmod 0644 \
+        "$PERSIST_MNT/etc/inauto/serial.txt" \
+        "$PERSIST_MNT/etc/inauto/channel" \
+        "$PERSIST_MNT/etc/inauto/update-server"
+    log "persist metadata: serial=$panel_serial channel=$UPDATE_CHANNEL update-server=$UPDATE_SERVER"
 
     # x11vnc.pass placeholder (0600), пустой — настраивается отдельно
     local vnc="$PERSIST_MNT/etc/x11vnc.pass"
@@ -621,6 +769,10 @@ else
         BACKUP_DIR="$BACKUP_DIR" "$BACKUP_SCRIPT" restore "$INAUTO_MNT" \
             || warn "restore не выполнен; backup остаётся в $BACKUP_DIR до reboot'а"
     fi
+
+    printf '%s\n' "$PANEL_HOSTNAME" > "$INAUTO_MNT/staff/hostname"
+    chmod 0644 "$INAUTO_MNT/staff/hostname"
+    log "записан /home/inauto/staff/hostname = $PANEL_HOSTNAME"
 fi
 
 run umount "$INAUTO_MNT"

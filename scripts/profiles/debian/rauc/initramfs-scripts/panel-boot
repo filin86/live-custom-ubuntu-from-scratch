@@ -6,14 +6,16 @@
 #  1) переносит squashfs из ${rootmnt} в /run/panel/lower;
 #  2) поверх него кладёт tmpfs overlay upper;
 #  3) монтирует /run/panel/persist (ext4);
-#  4) bind-mount'ит persistent entries через panel-init-persist-paths;
+#  4) проецирует persistent entries через panel-init-persist-paths
+#     (dirs -> bind-mount, files -> symlink на /run/panel/persist/...);
 #  5) монтирует inauto-data -> /home/inauto;
 #  6) монтирует container-store -> /var/lib/inauto/container-store и bind-mount'ит
 #     docker/containerd roots;
 #  7) переносит готовый overlay в ${rootmnt} для switch_root.
 #
 # Требования к cmdline:
-#   root=/dev/disk/by-partlabel/rootfs_A|rootfs_B rootfstype=squashfs ro
+#   kernel и/или initramfs должны суметь смонтировать squashfs root в ${rootmnt}
+#   (например, через root=PARTUUID=<...> rootfstype=squashfs ro)
 #   rauc.slot=system0|system1  (или A|B для U-Boot — не используется этим скриптом,
 #                               но RAUC клиент читает её для status/mark-good).
 #
@@ -84,7 +86,7 @@ mount -t overlay overlay \
 mkdir -p "$PANEL_ROOT/persist"
 mount -t ext4 /dev/disk/by-partlabel/persist "$PANEL_ROOT/persist"
 
-# 4) bind persist entries в overlay (инициализация дефолтов из lower при необходимости)
+# 4) project persist entries в overlay (инициализация дефолтов из lower при необходимости)
 if [ -x /sbin/panel-init-persist-paths ]; then
     /sbin/panel-init-persist-paths \
         "$PANEL_ROOT/persist" \

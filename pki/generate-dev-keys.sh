@@ -4,7 +4,7 @@
 #
 # Output:
 #   dev-root-ca.key / dev-root-ca.crt  — dev root CA (10 лет)
-#   dev-signing.key / dev-signing.crt  — dev signing cert (1 год, подписан dev-root-ca; только dev)
+#   dev-signing.key / dev-signing.crt  — dev signing cert (5 лет по умолчанию, подписан dev-root-ca; только dev)
 #   dev-keyring.pem                     — root CA в формате keyring для RAUC
 
 set -euo pipefail
@@ -18,6 +18,21 @@ cd "$(dirname "$0")"
 
 ORG="${ORG:-Inauto Panels DEV}"
 RSA_BITS="${RSA_BITS:-4096}"
+DEV_ROOT_VALIDITY_DAYS="${DEV_ROOT_VALIDITY_DAYS:-3650}"
+DEV_SIGNING_VALIDITY_DAYS="${DEV_SIGNING_VALIDITY_DAYS:-1825}"
+
+for days_var in DEV_ROOT_VALIDITY_DAYS DEV_SIGNING_VALIDITY_DAYS; do
+    days="${!days_var}"
+    if ! [[ "$days" =~ ^[0-9]+$ ]] || (( days <= 0 )); then
+        echo "ERROR: $days_var must be a positive integer, got: $days" >&2
+        exit 1
+    fi
+done
+
+if (( DEV_SIGNING_VALIDITY_DAYS >= DEV_ROOT_VALIDITY_DAYS )); then
+    echo "ERROR: DEV_SIGNING_VALIDITY_DAYS must be less than DEV_ROOT_VALIDITY_DAYS." >&2
+    exit 1
+fi
 
 if [[ -f dev-root-ca.key || -f dev-signing.key ]]; then
     echo "WARNING: dev keys already exist in $(pwd)"
@@ -25,16 +40,16 @@ if [[ -f dev-root-ca.key || -f dev-signing.key ]]; then
     exit 1
 fi
 
-echo "==> Generating DEV Root CA (RSA-$RSA_BITS, 10 years)"
+echo "==> Generating DEV Root CA (RSA-$RSA_BITS, ~$((DEV_ROOT_VALIDITY_DAYS / 365)) years)"
 openssl req -x509 -newkey rsa:$RSA_BITS -nodes \
     -keyout dev-root-ca.key \
     -out dev-root-ca.crt \
-    -days 3650 \
+    -days "$DEV_ROOT_VALIDITY_DAYS" \
     -subj "/CN=$ORG Root CA/O=$ORG"
 
 chmod 600 dev-root-ca.key
 
-echo "==> Generating DEV Signing Cert (RSA-$RSA_BITS, 1 year)"
+echo "==> Generating DEV Signing Cert (RSA-$RSA_BITS, ~$((DEV_SIGNING_VALIDITY_DAYS / 365)) years)"
 openssl req -newkey rsa:$RSA_BITS -nodes \
     -keyout dev-signing.key \
     -out dev-signing.csr \
@@ -48,7 +63,7 @@ printf "keyUsage=critical,digitalSignature\nextendedKeyUsage=emailProtection,cod
 openssl x509 -req -in dev-signing.csr \
     -CA dev-root-ca.crt -CAkey dev-root-ca.key -CAcreateserial \
     -out dev-signing.crt \
-    -days 365 \
+    -days "$DEV_SIGNING_VALIDITY_DAYS" \
     -extfile "$EXTFILE"
 
 rm -f "$EXTFILE" dev-signing.csr dev-root-ca.srl

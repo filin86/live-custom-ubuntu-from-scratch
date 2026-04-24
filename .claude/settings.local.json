@@ -34,7 +34,9 @@
       "Bash(cp scripts/profiles/ubuntu/rauc/systemd-units/panel-check-updates.timer scripts/profiles/debian/rauc/systemd-units/)",
       "Bash(bash -n scripts/profiles/ubuntu/rauc/scripts/panel-check-updates.sh)",
       "Bash(bash -n scripts/targets/rauc/installer/backup-restore-home.sh)",
-      "Bash(bash -n scripts/build-in-docker.sh)"
+      "Bash(bash -n scripts/build-in-docker.sh)",
+      "Bash(command -v shellcheck)",
+      "Bash(shellcheck /home/user/dev/livecd/scripts/build-rauc-release.sh)"
     ]
   }
 }

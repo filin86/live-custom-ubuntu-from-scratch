@@ -75,7 +75,10 @@ chmod 600 prod-signing.key
 
 echo "==> Signing by Root CA"
 EXTFILE="./prod-signing.ext"
-printf "keyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning\nbasicConstraints=CA:false\n" > "$EXTFILE"
+# RAUC verifies CMS signatures with OpenSSL's smimesign purpose.
+# Keep codeSigning for audit clarity, but add emailProtection so the
+# resulting signing cert verifies both in local tooling and on panels.
+printf "keyUsage=critical,digitalSignature\nextendedKeyUsage=emailProtection,codeSigning\nbasicConstraints=CA:false\n" > "$EXTFILE"
 
 openssl x509 -req -in prod-signing.csr \
     -CA prod-root-ca.crt -CAkey prod-root-ca.key -CAcreateserial \

@@ -60,8 +60,12 @@
 
 - проверяет UEFI mode;
 - показывает список внутренних дисков `>= 32 GiB`;
+- спрашивает hostname панели;
+- даёт выбор update-channel (`stable` или `candidate`) и спрашивает адрес update-server;
 - в начале спрашивает, нужен ли backup старого `/home/inauto`;
 - если backup нужен, предлагает место для архива;
+- пишет hostname в `/home/inauto/staff/hostname`;
+- генерирует serial автоматически как `<hostname>-<uuid>`;
 - просит ввести `ERASE` перед стиранием диска;
 - показывает прогресс установки;
 - предлагает reboot после успешной установки.
@@ -87,13 +91,19 @@
 ssh ubuntu@<ip_панели>
 sudo -i
 
-echo "https://panels.example.com" > /etc/inauto/update-server
-echo "stable"                    > /etc/inauto/channel
-echo "panel-<site>-<n>"          > /etc/inauto/serial.txt
+cat /home/inauto/staff/hostname
+cat /etc/inauto/{update-server,channel,serial.txt}
 
 systemctl restart panel-check-updates.timer
 systemctl list-timers panel-check-updates.timer
 ```
+
+Ожидаемо:
+
+- `/home/inauto/staff/hostname` = введённый в мастере hostname;
+- `/etc/inauto/channel` = выбранный channel;
+- `/etc/inauto/update-server` = введённый URL сервера;
+- `/etc/inauto/serial.txt` = `<hostname>-<uuid>`.
 
 Через 5-10 минут в `panels` таблице на update-server'е должен появиться
 heartbeat от нового serial.
@@ -123,6 +133,8 @@ heartbeat от нового serial.
 - [ ] `rauc status` показывает booted slot = `system0`, slot state = `good`.
 - [ ] `/home/inauto/.inautolock` существует; skeleton директорий создан.
 - [ ] `/etc/inauto/firmware-version` = ожидаемая `<VERSION>`.
+- [ ] `/home/inauto/staff/hostname` = ожидаемый hostname панели.
+- [ ] `/etc/inauto/serial.txt` имеет вид `<hostname>-<uuid>`.
 - [ ] `docker info` работает.
 - [ ] `systemctl is-active lightdm docker containerd x11vnc ssh` все `active`.
 - [ ] Heartbeat появился в `panels.last_seen` на update-server'е.

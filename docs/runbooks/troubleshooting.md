@@ -186,6 +186,74 @@ journalctl -u panel-check-updates.service -b --no-pager | tail -50
    /usr/local/bin/panel-check-updates.sh
    ```
 
+## 5a. `rauc install` падает с D-Bus activation timeout
+
+### Симптомы
+- `panel-check-updates.sh` скачивает bundle, но на `rauc install` пишет:
+  `Error calling StartServiceByName for de.pengutronix.rauc: timed out`
+
+### Диагностика
+
+```bash
+systemctl start rauc.service
+systemctl status rauc.service --no-pager
+journalctl -u rauc.service -b --no-pager | tail -100
+ls -ld /var/lib/rauc
+```
+
+Частые причины:
+- `rauc.service` не успел подняться по D-Bus activation и нужен явный старт.
+- отсутствует или повреждён `data-directory=/var/lib/rauc`.
+- runtime-проблема со slot devices или EFI backend, из-за чего `rauc service`
+  не успевает захватить `de.pengutronix.rauc`.
+
+### Что делать
+
+1. Если `systemctl start rauc.service` перевёл сервис в `active (running)`,
+   повторить `/usr/local/bin/panel-check-updates.sh`.
+2. Если сервис не стартует, смотреть `journalctl -u rauc.service -b`.
+3. В новых образах update-agent перед `rauc install` уже делает явный
+   `systemctl start rauc.service`.
+
+## 5b. После update kernel panic'ится с `unknown-block(0,0)`
+
+### Симптомы
+- после server-driven update ядро стартует, но падает на:
+  `VFS: Cannot open root device ... or unknown-block(0,0)`
+- на экране есть `Please append a correct "root=" boot option`
+
+### Что это обычно значит
+
+UEFI boot entry переключился на новый slot, но kernel получил нерабочий
+`root=` или не поднял initramfs. Для EFI-stub загрузки это особенно больно,
+если `root=` указывает на `/dev/disk/by-partlabel/...`: на таком раннем этапе
+эти symlink'и ещё недоступны без userspace/udev.
+
+### Как восстановиться
+
+1. Через firmware boot menu загрузиться обратно в предыдущий рабочий entry
+   (`system0` или `system1`).
+2. Проверить текущие записи:
+   ```bash
+   efibootmgr -v
+   ```
+3. Пересоздать запись проблемного slot'а с `root=PARTUUID=...`:
+   ```bash
+   ROOTFS_B_PARTUUID="$(blkid -s PARTUUID -o value /dev/disk/by-partlabel/rootfs_B)"
+   EFI_B_PART="$(lsblk -dn -o PARTN /dev/disk/by-partlabel/efi_B | tr -d '[:space:]')"
+
+   efibootmgr --create --disk /dev/sda --part "$EFI_B_PART" \
+     --label "system1" \
+     --loader '\EFI\BOOT\BOOTX64.EFI' \
+     --unicode "initrd=\\EFI\\Linux\\initrd.img rauc.slot=system1 root=PARTUUID=${ROOTFS_B_PARTUUID} rootfstype=squashfs ro quiet panic=30"
+   ```
+
+### Статус фикса
+
+Installer теперь создаёт EFI entries с `root=PARTUUID=...`, а не с
+`/dev/disk/by-partlabel/...`. Это защищает первый boot даже если initramfs
+не был подхвачен.
+
 ## 6. Docker compose проекты не восстанавливаются
 
 См. `docs/runbooks/docker-container-store.md`. Коротко:

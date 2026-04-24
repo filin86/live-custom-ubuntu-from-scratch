@@ -32,27 +32,9 @@ mkdir -p "$OUT_DIR"
 
 EFI_VFAT_SIZE_MIB="${EFI_VFAT_SIZE_MIB:-512}"
 
-for tool in mkfs.vfat mmd mcopy truncate rauc; do
+for tool in mkfs.vfat mmd mcopy truncate; do
     command -v "$tool" >/dev/null 2>&1 || fail "не найден инструмент '$tool'."
 done
-
-# Gate: pinned RAUC принимает efi-loader/efi-cmdline в [slot.efi.*]?
-# Поля документированы начиная с RAUC 1.10 (EFI backend refactor).
-# Production-сборка pin'ит актуальную RAUC-версию через RAUC_PINNED_VERSION.
-rauc_version="$(rauc --version 2>/dev/null | awk 'NR==1{print $NF}' || true)"
-if [[ -z "$rauc_version" || ! "$rauc_version" =~ ^([0-9]+)\.([0-9]+) ]]; then
-    fail "не удалось определить версию RAUC; установите пакет rauc >= 1.10."
-fi
-rauc_major="${BASH_REMATCH[1]}"
-rauc_minor="${BASH_REMATCH[2]}"
-
-if (( rauc_major < 1 )) || { (( rauc_major == 1 )) && (( rauc_minor < 10 )); }; then
-    fail "RAUC ${rauc_version} слишком стар: efi-loader/efi-cmdline требуют минимум 1.10."
-fi
-if command -v dpkg >/dev/null 2>&1 \
-        && ! dpkg --compare-versions "$rauc_version" ge "${RAUC_PINNED_VERSION:-1.15.2}"; then
-    log "WARNING: RAUC ${rauc_version} ниже pinned ${RAUC_PINNED_VERSION:-1.15.2}. Перед production обновите pinned-версию."
-fi
 
 case "${TARGET_PLATFORM}" in
     pc-efi)

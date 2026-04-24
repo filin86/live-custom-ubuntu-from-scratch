@@ -9,6 +9,6 @@
 *.der
 
 # Allow documentation and generator scripts
-!README.md
+!*.md
 !generate-*.sh
 !.gitignore

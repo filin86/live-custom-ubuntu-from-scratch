@@ -1,5 +1,5 @@
 #!/bin/sh
-# Инициализирует /persist и накладывает bind-mount'ы persistent paths на overlay-rootfs.
+# Инициализирует /persist и проецирует persistent paths в overlay-rootfs.
 # Запускается из initramfs (local-bottom/panel-boot) после того, как:
 #  - /persist примонтирован (ext4, RW);
 #  - /lower примонтирован (squashfs rootfs текущего slot'а, RO);
@@ -18,13 +18,37 @@ set -eu
 PERSIST_ROOT="${1:?panel-init-persist-paths: PERSIST_ROOT не задан}"
 LOWER_ROOT="${2:?panel-init-persist-paths: LOWER_ROOT не задан}"
 OVERLAY_ROOT="${3:?panel-init-persist-paths: OVERLAY_ROOT не задан}"
+CONSOLE_LOG=0
+
+if [ -r /proc/cmdline ]; then
+    for arg in $(cat /proc/cmdline); do
+        case "$arg" in
+            inauto.debug=1|inauto.initramfs_debug=1|debug)
+                CONSOLE_LOG=1
+                ;;
+        esac
+    done
+fi
 
 log() {
-    printf '[panel-init-persist-paths] %s\n' "$*"
+    msg="[panel-init-persist-paths] $*"
+
+    if [ -w /dev/kmsg ]; then
+        printf '<6>%s\n' "$msg" > /dev/kmsg 2>/dev/null || true
+    fi
+
+    if [ "$CONSOLE_LOG" -eq 1 ]; then
+        printf '%s\n' "$msg"
+    fi
 }
 
 # Маркер "dir" — ожидаем директорию, "file" — файл.
 # Формат: "<kind>:<relative-path>".
+#
+# Директории публикуем в overlay через bind-mount, а файлы — через symlink на
+# /run/panel/persist/<path>. File bind-mount'ы из initramfs под parent overlay
+# оказались ненадёжны после switch_root; symlink'и на persist переживают boot
+# стабильно и при этом не делают /etc/inauto целиком persistent.
 PERSIST_ENTRIES="
 file:etc/machine-id
 file:etc/hostname
@@ -44,6 +68,14 @@ ensure_dir() { mkdir -p "$1"; }
 ensure_file() {
     ensure_dir "$(dirname "$1")"
     [ -e "$1" ] || : > "$1"
+}
+
+ensure_absent() {
+    path="$1"
+
+    if [ -L "$path" ] || [ -f "$path" ]; then
+        rm -f "$path"
+    fi
 }
 
 init_entry() {
@@ -68,22 +100,28 @@ init_entry() {
     esac
 }
 
-bind_entry() {
+project_entry() {
     kind="$1"
     rel="$2"
     persist_path="${PERSIST_ROOT}/${rel}"
     overlay_path="${OVERLAY_ROOT}/${rel}"
+    runtime_persist_path="/run/panel/persist/${rel}"
 
     if [ ! -e "$persist_path" ]; then
         return 0
     fi
 
     case "$kind" in
-        dir)  ensure_dir "$overlay_path" ;;
-        file) ensure_file "$overlay_path" ;;
+        dir)
+            ensure_dir "$overlay_path"
+            mount --bind "$persist_path" "$overlay_path"
+            ;;
+        file)
+            ensure_dir "$(dirname "$overlay_path")"
+            ensure_absent "$overlay_path"
+            ln -s "$runtime_persist_path" "$overlay_path"
+            ;;
     esac
-
-    mount --bind "$persist_path" "$overlay_path"
 }
 
 parse_and_run() {
@@ -97,10 +135,10 @@ parse_and_run() {
     done
 }
 
-log "инициализация отсутствующих persistent-записей из $LOWER_ROOT"
+log "init missing persistent entries from $LOWER_ROOT"
 parse_and_run init_entry
 
-log "bind-mount persistent-записей в $OVERLAY_ROOT"
-parse_and_run bind_entry
+log "project persistent entries into $OVERLAY_ROOT"
+parse_and_run project_entry
 
-log "готово"
+log "done"

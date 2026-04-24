@@ -13,15 +13,11 @@ path=/etc/rauc/keyring.pem
 device=/dev/disk/by-partlabel/efi_A
 type=vfat
 bootname=system0
-efi-loader=\\EFI\\BOOT\\BOOTX64.EFI
-efi-cmdline=initrd=\\EFI\\Linux\\initrd.img rauc.slot=system0 root=/dev/disk/by-partlabel/rootfs_A rootfstype=squashfs ro quiet panic=30
 
 [slot.efi.1]
 device=/dev/disk/by-partlabel/efi_B
 type=vfat
 bootname=system1
-efi-loader=\\EFI\\BOOT\\BOOTX64.EFI
-efi-cmdline=initrd=\\EFI\\Linux\\initrd.img rauc.slot=system1 root=/dev/disk/by-partlabel/rootfs_B rootfstype=squashfs ro quiet panic=30
 
 [slot.rootfs.0]
 device=/dev/disk/by-partlabel/rootfs_A

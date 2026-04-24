@@ -1,6 +1,6 @@
 # PKI: текущее состояние и переход к production
 
-Сгенерировано: 2026-04-20
+Обновлено: 2026-04-24
 
 ## Текущее состояние — Dev PKI
 
@@ -8,9 +8,9 @@
 
 | Файл | Роль | Валидность |
 |---|---|---|
-| `dev-root-ca.crt` | Публичный корневой CA. Попадёт в rootfs как `/etc/rauc/keyring.pem` на панелях (при dev-сборке). | до 2036-04-17 (10 лет) |
+| `dev-root-ca.crt` | Публичный корневой CA. Попадёт в rootfs как `/etc/rauc/keyring.pem` на панелях (при dev-сборке). | до 2036-04-18 (10 лет) |
 | `dev-root-ca.key` | **Приватный** ключ Root CA. Только локально, не распространять. | — |
-| `dev-signing.crt` | Публичный signing-cert, подписан Root CA. Для dev-сборок `.raucb`. | до 2027-04-20 (1 год) |
+| `dev-signing.crt` | Публичный signing-cert, подписан Root CA. Для dev-сборок `.raucb`. | до 2031-04-23 (5 лет) |
 | `dev-signing.key` | **Приватный** signing-key. Монтируется в builder/CI при сборке bundle'ов. | — |
 | `dev-keyring.pem` | Копия Root CA для RAUC — укладывается в rootfs. | — |
 
@@ -21,6 +21,10 @@ openssl verify -CAfile dev-root-ca.crt dev-signing.crt
 ```
 
 Все приватные ключи/сертификаты внесены в `.gitignore` — в git не попадут.
+
+Для сохранения совместимости с уже прошитыми dev-образами dev root CA не
+ротировался: перевыпущен только `dev-signing.crt` под тем же `dev-root-ca.crt`.
+Для этого добавлен отдельный helper `./pki/generate-dev-signing-cert.sh`.
 
 ### Использование dev-ключей
 
@@ -94,6 +98,11 @@ cd pki/
 На выходе:
 - `prod-signing.crt` — публичный.
 - `prod-signing.key` — приватный.
+
+Примечание: production signing cert должен иметь
+`extendedKeyUsage=emailProtection,codeSigning`. Для RAUC это важно, потому что
+bundle signature проверяется через OpenSSL `smimesign`; cert только с
+`codeSigning` не пройдёт verify (`unsuitable certificate purpose`).
 
 ### Шаг 5 — Безопасный перенос артефактов
 

@@ -147,6 +147,30 @@ build_heartbeat_body() {
     jq "${jq_args[@]}" "$filter"
 }
 
+ensure_rauc_service() {
+    if systemctl is-active --quiet rauc.service; then
+        return 0
+    fi
+
+    log "запускаю rauc.service перед install"
+    if ! systemctl start rauc.service; then
+        warn "systemctl start rauc.service завершился ошибкой"
+        systemctl --no-pager --full status rauc.service >&2 || true
+        return 1
+    fi
+
+    for _ in $(seq 1 15); do
+        if systemctl is-active --quiet rauc.service; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    warn "rauc.service не перешёл в active после явного запуска"
+    systemctl --no-pager --full status rauc.service >&2 || true
+    return 1
+}
+
 # --- install gate (решение принято выше в should_install) ----------------
 # При успешном install systemctl reboot'ится сразу — heartbeat не шлём
 # (он всё равно уйдёт после reboot'а на следующем timer-tick'е).
@@ -166,6 +190,9 @@ if should_install; then
             -o "$BUNDLE_TMP" "$BUNDLE_URL"; then
         INSTALL_EXIT=$?
         warn "curl завершился с кодом $INSTALL_EXIT; отправляю heartbeat с last_error"
+    elif ! ensure_rauc_service; then
+        INSTALL_EXIT=3
+        warn "rauc.service не удалось поднять; отправляю heartbeat с last_error"
     else
         log "rauc install $BUNDLE_TMP"
         if rauc install "$BUNDLE_TMP"; then

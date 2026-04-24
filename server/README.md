@@ -23,8 +23,8 @@ cp ../pki/dev-keyring.pem server/keyring/keyring.pem
 
 ```
 INAUTO_UPLOAD_TOKEN=replace-with-strong-random
-INAUTO_PUBLIC_BASE_URL=http://panels.example.local:8080
-INAUTO_LISTEN_PORT=8080
+INAUTO_PUBLIC_BASE_URL=http://panels.example.local:9001
+INAUTO_LISTEN_PORT=9001
 ```
 
 Старт:
@@ -42,7 +42,16 @@ docker compose up -d --build
 curl -fsS -H "Authorization: Bearer $INAUTO_UPLOAD_TOKEN" \
     -F "file=@../out/inauto-panel-ubuntu-amd64-pc-efi-2026.04.20.1.raucb" \
     -F "channel=candidate" \
-    http://localhost:8080/api/upload
+    http://localhost:9001/api/upload
+```
+
+По умолчанию `nginx` на сервере принимает upload'ы до `4G`, чего хватает для
+текущих `.raucb` bundle'ов. После изменения `server/nginx.conf` перезапустите
+`nginx` контейнер:
+
+```bash
+cd server
+docker compose restart nginx
 ```
 
 `rauc info` распаковывает manifest, сервер проверяет `version` против

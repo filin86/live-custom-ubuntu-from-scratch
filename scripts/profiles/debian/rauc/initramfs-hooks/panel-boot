@@ -26,7 +26,7 @@ for mod in nvme nvme_core sd_mod ahci ata_piix libata mmc_block sdhci_pci sdhci_
     manual_add_modules "$mod" || true
 done
 
-# helper, читающий /persist и bind-mount'ящий persistent paths в overlay
+# helper, читающий /persist и проецирующий persistent paths в overlay
 if [ -x /usr/local/sbin/panel-init-persist-paths ]; then
     copy_exec /usr/local/sbin/panel-init-persist-paths /sbin/panel-init-persist-paths
 else

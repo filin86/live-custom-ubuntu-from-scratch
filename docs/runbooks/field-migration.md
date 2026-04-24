@@ -170,17 +170,21 @@ done
 Образы скачаются в `container-store` и после первого reboot'а будут
 автовосстанавливаться.
 
-### Этап 6 — Смена канала и serial
+### Этап 6 — Проверка hostname, канала и serial
 
 ```bash
-echo "stable" > /etc/inauto/channel
-echo "panel-<site>-<n>" > /etc/inauto/serial.txt
-# update-server уже был в backup'е /persist — но /persist в новой rootfs
-# по умолчанию пустой. Заполняем вручную:
-echo "https://panels.example.com" > /etc/inauto/update-server
+cat /home/inauto/staff/hostname
+cat /etc/inauto/{update-server,channel,serial.txt}
 
 systemctl restart panel-check-updates.timer
 ```
+
+Ожидаемо installer уже заполнил:
+
+- `/home/inauto/staff/hostname` — hostname панели, введённый оператором;
+- `/etc/inauto/channel` — выбранный channel (`stable` или `candidate`);
+- `/etc/inauto/update-server` — выбранный URL сервера;
+- `/etc/inauto/serial.txt` — `<hostname>-<uuid>`.
 
 ### Этап 7 — Acceptance
 

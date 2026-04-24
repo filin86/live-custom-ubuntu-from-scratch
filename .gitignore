@@ -5,3 +5,8 @@ scripts/image
 scripts/reports
 scripts/certificates
 *.iso
+/.idea/inspectionProfiles/profiles_settings.xml
+/.idea/.gitignore
+/.idea/livecd.iml
+/.idea/modules.xml
+/.idea/vcs.xml

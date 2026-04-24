@@ -15,6 +15,6 @@ ENV PYTHONUNBUFFERED=1 \
     INAUTO_BUNDLE_DIR=/var/lib/inauto-update/bundles
 
 VOLUME ["/var/lib/inauto-update"]
-EXPOSE 8000
+EXPOSE 9000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9000"]

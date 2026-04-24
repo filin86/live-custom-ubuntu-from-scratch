@@ -95,6 +95,35 @@ pair_value() {
     sed -n "s/.*${key}=\"\\([^\"]*\\)\".*/\\1/p" <<<"$line"
 }
 
+trim_ws() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s\n' "$value"
+}
+
+validate_panel_hostname() {
+    local hostname="$1"
+    [[ "$hostname" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
+normalize_update_channel() {
+    printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+validate_update_channel() {
+    local channel="$1"
+    case "$channel" in
+        stable|candidate) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+validate_update_server() {
+    local server="$1"
+    [[ "$server" =~ ^https?://[^[:space:]]+$ ]]
+}
+
 disk_rows() {
     lsblk -dn -P -b -o PATH,SIZE,MODEL,SERIAL,TRAN,RM,TYPE 2>/dev/null \
         | while IFS= read -r line; do
@@ -294,6 +323,93 @@ choose_backup_dir() {
     printf '%s\n' "$dir"
 }
 
+choose_panel_settings() {
+    local hostname="${PANEL_HOSTNAME:-}"
+    local channel="${UPDATE_CHANNEL:-stable}"
+    local server="${UPDATE_SERVER:-}"
+    local stable_selected candidate_selected
+
+    while true; do
+        if have_gui; then
+            hostname="$(zenity --entry \
+                --title="$TITLE" \
+                --width=720 \
+                --entry-text="$hostname" \
+                --text="Введите имя панели.
+
+Оно будет записано в /home/inauto/staff/hostname,
+а serial будет создан автоматически как <hostname>-<uuid>." || true)"
+            [[ -n "$hostname" ]] || exit 1
+
+            channel="$(normalize_update_channel "$channel")"
+            stable_selected=FALSE
+            candidate_selected=FALSE
+            if [[ "$channel" == "candidate" ]]; then
+                candidate_selected=TRUE
+            else
+                stable_selected=TRUE
+            fi
+
+            channel="$(zenity --list --radiolist \
+                --title="$TITLE" \
+                --width=720 --height=260 \
+                --text="Выберите update-channel для панели." \
+                --column="" --column="Channel" --column="Назначение" \
+                "$stable_selected" stable "Рабочий парк / production" \
+                "$candidate_selected" candidate "Тестовые панели / pre-release" || true)"
+            [[ -n "$channel" ]] || exit 1
+
+            server="$(zenity --entry \
+                --title="$TITLE" \
+                --width=720 \
+                --entry-text="$server" \
+                --text="Введите адрес update-server.
+
+Пример: http://172.16.88.80:9001" || true)"
+            [[ -n "$server" ]] || exit 1
+        else
+            printf 'Hostname панели'
+            [[ -n "$hostname" ]] && printf ' [%s]' "$hostname"
+            printf ': '
+            read -r REPLY
+            [[ -n "$REPLY" ]] && hostname="$REPLY"
+
+            printf 'Update channel (stable/candidate)'
+            [[ -n "$channel" ]] && printf ' [%s]' "$channel"
+            printf ': '
+            read -r REPLY
+            [[ -n "$REPLY" ]] && channel="$REPLY"
+
+            printf 'Update server'
+            [[ -n "$server" ]] && printf ' [%s]' "$server"
+            printf ': '
+            read -r REPLY
+            [[ -n "$REPLY" ]] && server="$REPLY"
+        fi
+
+        hostname="$(trim_ws "$hostname")"
+        channel="$(normalize_update_channel "$(trim_ws "$channel")")"
+        server="$(trim_ws "$server")"
+
+        if ! validate_panel_hostname "$hostname"; then
+            warn "Hostname должен содержать только латиницу, цифры, '.', '_' или '-'
+и начинаться с буквы/цифры."
+            continue
+        fi
+        if ! validate_update_channel "$channel"; then
+            warn "Channel должен быть stable или candidate."
+            continue
+        fi
+        if ! validate_update_server "$server"; then
+            warn "Адрес update-server должен начинаться с http:// или https://"
+            continue
+        fi
+
+        printf '%s\t%s\t%s\n' "$hostname" "$channel" "$server"
+        return 0
+    done
+}
+
 ensure_backup_dir_writable() {
     local dir="$1"
     local probe
@@ -334,6 +450,9 @@ run_installer() {
     local backup_dir="$2"
     local allow_no_backup="$3"
     local skip_backup="$4"
+    local panel_hostname="$5"
+    local update_channel="$6"
+    local update_server="$7"
     local status=0
     local worker_status=0
     local zenity_status=0
@@ -342,7 +461,15 @@ run_installer() {
 
     rm -f "$STATUS_FILE"
 
-    cmd=(env "TARGET_DEVICE=$target" "BACKUP_DIR=$backup_dir" "SKIP_REBOOT=1" "FORCE_YES=1")
+    cmd=(env
+        "TARGET_DEVICE=$target"
+        "BACKUP_DIR=$backup_dir"
+        "SKIP_REBOOT=1"
+        "FORCE_YES=1"
+        "PANEL_HOSTNAME=$panel_hostname"
+        "UPDATE_CHANNEL=$update_channel"
+        "UPDATE_SERVER=$update_server"
+    )
     if [[ "$allow_no_backup" == "1" ]]; then
         cmd+=("ALLOW_NO_BACKUP=1")
     fi
@@ -416,6 +543,8 @@ main() {
     ensure_runtime_tools
 
     local target backup_dir="/tmp/inauto-backup" allow_no_backup=0 skip_backup=0
+    local panel_hostname update_channel update_server
+    local settings
     if [[ -n "${TARGET_DEVICE:-}" ]]; then
         target="$TARGET_DEVICE"
         [[ -b "$target" ]] || {
@@ -426,6 +555,9 @@ main() {
         target="$(select_disk)"
     fi
     [[ -n "$target" ]] || exit 1
+
+    settings="$(choose_panel_settings)"
+    IFS=$'\t' read -r panel_hostname update_channel update_server <<<"$settings"
 
     if confirm "Попробовать сохранить старый /home/inauto перед разметкой диска?
 
@@ -461,9 +593,14 @@ $backup_dir
 
 Диск: $target
 Backup: $(if [[ "$skip_backup" == "1" ]]; then echo "пропущен"; else echo "$backup_dir"; fi)
+Hostname: $panel_hostname
+Serial: ${panel_hostname}-<uuid>
+Channel: $update_channel
+Update server: $update_server
 Лог: $LOG_FILE"
 
-    if run_installer "$target" "$backup_dir" "$allow_no_backup" "$skip_backup"; then
+    if run_installer "$target" "$backup_dir" "$allow_no_backup" "$skip_backup" \
+        "$panel_hostname" "$update_channel" "$update_server"; then
         info "Установка завершена успешно.
 
 Лог: $LOG_FILE"
