@@ -9,7 +9,7 @@
 - Новая цель сборки `TARGET_FORMAT=rauc` для immutable operator-панелей с A/B обновлениями через RAUC. ISO-путь остаётся дефолтом и не меняется.
 - `TARGET_PLATFORM=pc-efi` (UEFI PC, MVP); `<board>-uboot` зарезервирован для планшетов после идентификации BSP.
 - Новые build-переменные: `TARGET_ARCH`, `RAUC_BUNDLE_VERSION` (обязательна для релизов, production regex `^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$`, dev-префикс `dev.*`), `INAUTO_OVERLAY_SIZE`, `INAUTO_SITE_CONFIG_DIR`, `INAUTO_AUTOSTART_SCRIPT`, `INAUTO_JOURNAL_DIR`.
-- `scripts/targets/rauc/`: `common.sh` (helpers), `build-bundle.sh`, `build-boot-vfat.sh`, `build-installer-image.sh`, `installer/install-to-disk.sh`, `installer/backup-restore-home.sh` (автоматический backup существующего `/home/inauto` до wipe'а диска + restore в `/home/inauto/backup/` после установки), `partition-layout/pc-efi.sgdisk`, `manifest-{efi,uboot}.raucm.template`.
+- `scripts/targets/rauc/`: `common.sh` (helpers), `build-bundle.sh`, `build-boot-vfat.sh`, `build-installer-image.sh`, `installer/install-to-disk.sh`, `installer/backup-restore-home.sh` (автоматический backup существующего `/home/inauto` до wipe'а диска с исключением `staff/docker/` + restore прямо в `/home/inauto/` после установки), `partition-layout/pc-efi.sgdisk`, `manifest-{efi,uboot}.raucm.template`.
 - RAUC-assets в профилях (`scripts/profiles/{ubuntu,debian}/rauc/`): `system-{efi,uboot}.conf.template`, initramfs hook+script для immutable overlay (`panel-boot`), `scripts/init-persist-paths.sh`, `scripts/panel-healthcheck.sh`, `scripts/panel-check-updates.sh`, systemd units `rauc-mark-boot-good.service` и `panel-check-updates.{service,timer}`.
 - Раздельный `DockerPersistentStorage.service` и `MountHome.service` для ISO vs RAUC builds.
 - Systemd watchdog default (`RuntimeWatchdogSec=60s`) + kernel `panic=30` в `efi-cmdline`.
@@ -58,6 +58,7 @@
 - `docker/container-entrypoint.sh::chown_outputs` теперь покрывает `<repo>/out/` и `*.raucb` наравне с `*.iso`.
 - Имя named volume для chroot теперь per-distro: `<repo>-chroot-<distro>`.
 - `config.sh::install_docker_engine` использует `DOCKER_APT_DISTRO` из профиля вместо хардкода `/linux/ubuntu`.
+- RAUC installer backup теперь исключает `staff/docker/`, а restore накатывает архив прямо в `/home/inauto/` поверх нового `inauto-data` skeleton'а.
 
 ### Removed
 - Поддержка Ubuntu релизов младше `noble` (24.04 LTS) — логика `lupin-casper` удалена.

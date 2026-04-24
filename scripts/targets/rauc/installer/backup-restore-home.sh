@@ -13,8 +13,9 @@
 #                 backup Ubuntu Live USB с подложенным .inautolock.
 #                 Выход: tar.zst + sha256 в $BACKUP_DIR.
 #   2) restore  — после установки и mount'а нового inauto-data; распаковывает
-#                 tarball в <new_inauto_data_mount>/backup/ подкаталог
-#                 (НЕ перезаписывает skeleton в /home/inauto/).
+#                 tarball прямо в <new_inauto_data_mount>, поверх свежего
+#                 skeleton'а. Структура /home/inauto восстанавливается сразу
+#                 в рабочий layout, без промежуточного backup/ подкаталога.
 #
 # Архив и его sha256 живут в $BACKUP_DIR (по умолчанию /tmp/inauto-backup —
 # это tmpfs live-session, RAM-only, автоматически пропадает после reboot'а).
@@ -22,7 +23,7 @@
 #
 # Вызов:
 #   ./backup-restore-home.sh backup
-#   ./backup-restore-home.sh restore [TARGET_DIR]      (default: /home/inauto/backup)
+#   ./backup-restore-home.sh restore <TARGET_DIR>
 #
 # Env:
 #   BACKUP_DIR       каталог для tar.zst (default /tmp/inauto-backup)
@@ -36,6 +37,11 @@ set -euo pipefail
 BACKUP_DIR="${BACKUP_DIR:-/tmp/inauto-backup}"
 BACKUP_TARBALL="${BACKUP_TARBALL:-$BACKUP_DIR/home-inauto.tar.zst}"
 BACKUP_MARKER=".inautolock"
+BACKUP_EXCLUDES=(
+    "./backup"
+    "./lost+found"
+    "./staff/docker"
+)
 
 log()  { echo "[backup-restore-home] $*"; }
 warn() { echo "[backup-restore-home] WARN: $*" >&2; }
@@ -166,8 +172,21 @@ do_backup() {
     trap cleanup_probe_mount EXIT
 
     # Оценка свободного места в BACKUP_DIR vs размера home (очень грубая).
-    local home_size_kb free_kb
-    home_size_kb=$(du -sk --one-file-system "$FOUND_HOME" 2>/dev/null | awk '{print $1}')
+    local home_size_kb free_kb exclude tar_excludes_str=""
+    local tar_excludes=()
+    local du_excludes=()
+    for exclude in "${BACKUP_EXCLUDES[@]}"; do
+        tar_excludes+=("--exclude=$exclude")
+        du_excludes+=("--exclude=$exclude")
+    done
+    printf -v tar_excludes_str '%q ' "${tar_excludes[@]}"
+    tar_excludes_str="${tar_excludes_str% }"
+
+    home_size_kb="$(
+        cd "$FOUND_HOME" && \
+        du -sk --one-file-system "${du_excludes[@]}" . 2>/dev/null | awk 'NR == 1 { print $1 }'
+    )"
+    home_size_kb="${home_size_kb:-0}"
     free_kb=$(df --output=avail -k "$BACKUP_DIR" | tail -n1)
     log "размер /home/inauto: $(numfmt --to=iec --from-unit=1024 "$home_size_kb")B; свободно в $BACKUP_DIR: $(numfmt --to=iec --from-unit=1024 "$free_kb")B"
     # Запас на tar-overhead и сжатие ~1.2× исходника (zstd typical для mixed content).
@@ -175,14 +194,15 @@ do_backup() {
         warn "в $BACKUP_DIR может не хватить места; задайте BACKUP_DIR=<путь на внешней USB> и перезапустите"
     fi
 
-    log "архивирую $FOUND_HOME → $BACKUP_TARBALL"
+    log "архивирую $FOUND_HOME → $BACKUP_TARBALL (исключая backup/, lost+found/, staff/docker/)"
     if [[ "${DRY_RUN:-0}" == "1" ]]; then
-        log "DRY-RUN: tar -C $FOUND_HOME --exclude './backup' -cf - . | zstd -T0 -3 -o $BACKUP_TARBALL"
+        log "DRY-RUN: tar -C $(printf '%q' "$FOUND_HOME") $tar_excludes_str --xattrs --acls -cf - . | zstd -T0 -3 -o $(printf '%q' "$BACKUP_TARBALL")"
         log "DRY-RUN: sha256sum $BACKUP_TARBALL > $BACKUP_TARBALL.sha256"
     else
-        # --exclude './backup' защищает от рекурсии при повторной миграции
-        # immutable -> immutable (когда старый backup уже лежит в /home/inauto/backup).
-        tar -C "$FOUND_HOME" --exclude='./backup' --exclude='./lost+found' \
+        # backup/ исключаем от рекурсии при повторной миграции со старых
+        # payload'ов, а staff/docker/ не забираем, потому что loopback ext4
+        # c runtime-данными Docker/containerd на immutable-цели больше не нужен.
+        tar -C "$FOUND_HOME" "${tar_excludes[@]}" \
             --xattrs --acls -cf - . | zstd -T0 -3 -o "$BACKUP_TARBALL"
         ( cd "$BACKUP_DIR" && \
           sha256sum "$(basename "$BACKUP_TARBALL")" > "$(basename "$BACKUP_TARBALL").sha256" )
@@ -192,11 +212,13 @@ do_backup() {
 }
 
 do_restore() {
-    local target="${1:-/home/inauto/backup}"
+    local target="${1:-}"
 
     command -v tar       >/dev/null || fail "нет tar"
     command -v zstd      >/dev/null || fail "нет zstd"
     command -v sha256sum >/dev/null || fail "нет sha256sum"
+
+    [[ -n "$target" ]] || fail "restore требует явный TARGET_DIR"
 
     if [[ ! -f "$BACKUP_TARBALL" ]]; then
         log "tarball $BACKUP_TARBALL не найден; нечего восстанавливать (новая панель или backup пропущен)"
@@ -216,13 +238,15 @@ do_restore() {
 
     log "распаковываю $BACKUP_TARBALL → $target"
     if [[ "${DRY_RUN:-0}" == "1" ]]; then
-        log "DRY-RUN: zstd -dc $BACKUP_TARBALL | tar -C $target --xattrs-include='*' -xf -"
+        log "DRY-RUN: zstd -dc $BACKUP_TARBALL | tar -C $target --acls --xattrs --xattrs-include='*' -xpf -"
+        log "DRY-RUN: test -f $target/$BACKUP_MARKER"
     else
-        zstd -dc "$BACKUP_TARBALL" | tar -C "$target" --xattrs-include='*' -xf -
+        zstd -dc "$BACKUP_TARBALL" | tar -C "$target" --acls --xattrs --xattrs-include='*' -xpf -
+        [[ -f "$target/$BACKUP_MARKER" ]] \
+            || fail "restore завершился, но $target/$BACKUP_MARKER не найден"
     fi
 
     log "restore выполнен: $target ($(du -sh "$target" 2>/dev/null | cut -f1 || echo '<dry-run>'))"
-    log "наладчик должен вручную перенести нужные поддиректории из $target в active layout"
 }
 
 case "${1:-}" in
@@ -234,6 +258,6 @@ case "${1:-}" in
         do_restore "${1:-}"
         ;;
     *)
-        fail "usage: $0 {backup|restore [target_dir]}"
+        fail "usage: $0 backup | restore <target_dir>"
         ;;
 esac

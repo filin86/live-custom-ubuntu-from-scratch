@@ -13,8 +13,9 @@ repartitioning **не поддерживается** в первом production-
 
 **Автоматический путь (по умолчанию):** installer сам ищет существующее
 `/home/inauto` с маркером `.inautolock` на non-removable устройствах,
-архивирует его до разметки диска и распаковывает в `/home/inauto/backup/`
-после установки. Ручной rsync на ноутбук инженера — fallback для
+архивирует его до разметки диска, исключая `staff/docker/`, и
+распаковывает обратно прямо в `/home/inauto/` после установки. Ручной
+rsync на ноутбук инженера — fallback для
 случаев, когда автомат не подходит (очень большой `/home/inauto`,
 особая топология дисков, debug).
 
@@ -79,17 +80,16 @@ installer его использует для автодетекта.
 
 Installer выполнит (в строгом порядке):
 - **Backup** — `backup-restore-home.sh backup` сканирует
-  non-removable блок-устройства на `.inautolock` (исключая
-  TARGET_DEVICE и USB), архивирует находку в `$BACKUP_DIR/home-inauto.tar.zst`
-  + `.sha256`.
+  non-removable блок-устройства на `.inautolock`, архивирует находку в
+  `$BACKUP_DIR/home-inauto.tar.zst` + `.sha256`, исключая `backup/`,
+  `lost+found/` и `staff/docker/`.
 - GPT разметка, dd raw-образов, UEFI entries, persist/inauto-data
   skeletons — всё как для новой панели.
-- **Restore** — `backup-restore-home.sh restore /home/inauto/backup` —
-  распаковывает archive в подкаталог `backup/`, skeleton сохраняется
-  нетронутым.
+- **Restore** — `backup-restore-home.sh restore /home/inauto` —
+  распаковывает archive прямо в `inauto-data`, поверх свежего skeleton'а.
 - Reboot.
 
-### Этап 4 — Перенос данных из `/home/inauto/backup` в active layout
+### Этап 4 — Проверка восстановленного `/home/inauto`
 
 После reboot'а на immutable firmware:
 
@@ -97,32 +97,21 @@ Installer выполнит (в строгом порядке):
 ssh ubuntu@<ip_панели>
 sudo -i
 
-ls /home/inauto/backup/
-# Ожидаем структуру старой панели: on_start/, on_login/, staff/, log/ и т.п.
+ls /home/inauto/
+# Ожидаем рабочую структуру: on_start/, on_login/, staff/, log/ и т.п.
 
-du -sh /home/inauto/backup/
+du -sh /home/inauto/
 # Сравнить с backup-tarball'ом или с `du` исходной панели до миграции.
+test ! -e /home/inauto/staff/docker
+# Ожидаемо: loopback ext4 store НЕ возвращается из backup'а.
 ```
 
-Перенос решает наладчик (installer не делает mixing автоматически,
-чтобы не затереть изменения skeleton'а от новой версии rootfs):
-
-```bash
-# Типичный сценарий — compose-проекты и site config переезжают целиком:
-rsync -aHAX /home/inauto/backup/staff/         /home/inauto/staff/
-rsync -aHAX /home/inauto/backup/on_start/      /home/inauto/on_start/
-rsync -aHAX /home/inauto/backup/on_login/      /home/inauto/on_login/
-
-# Если на старой панели был config/ site-specific каталог:
-[[ -d /home/inauto/backup/config ]] && \
-    rsync -aHAX /home/inauto/backup/config/ /home/inauto/config/
-
-# После переноса можно удалить backup (или оставить как audit trail):
-# rm -rf /home/inauto/backup
-```
+Дополнительный ручной перенос из `/home/inauto/backup` больше не нужен:
+installer сразу возвращает данные в рабочий layout. Если какого-то файла
+не было в backup'е, остаётся созданный installer'ом skeleton.
 
 **Важно про permissions:** installer восстанавливает xattrs/ACL через
-`tar --xattrs-include='*'`, но UIDs внутри tarball'а отражают старую
+`tar --acls --xattrs --xattrs-include='*'`, но UIDs внутри tarball'а отражают старую
 панель. Если user id'ы различаются (очень редко — autologin user =
 `ubuntu` с uid 1000 в обеих версиях), нужно `chown -R ubuntu:ubuntu
 /home/inauto/staff /home/inauto/on_login /home/inauto/on_start`.
@@ -135,7 +124,11 @@ rsync -aHAX /home/inauto/backup/on_login/      /home/inauto/on_login/
 
 ```bash
 # На панели:
-rsync -aHAXv --progress /home/inauto/ \
+rsync -aHAXv --progress \
+    --exclude '/backup/' \
+    --exclude '/lost+found/' \
+    --exclude '/staff/docker/' \
+    /home/inauto/ \
     engineer@laptop:/backup/panels/<serial>/home-inauto/
 
 ssh engineer@laptop 'du -sh /backup/panels/<serial>/home-inauto/'
@@ -205,7 +198,8 @@ systemctl restart panel-check-updates.timer
 ISO — обратный путь:
 
 1. Boot с Ubuntu Live USB.
-2. Restored `/home/inauto` уже есть в backup'е — можно использовать его.
+2. Если backup tarball или rsync-копия сохранились на внешнем носителе —
+   используйте их; иначе снимите свежую rsync-копию с текущего `/home/inauto`.
 3. Прошить старую ISO-версию (прежние команды `./scripts/build.sh -`
    и `dd` образа).
 4. Restore `/home/inauto` через rsync.
