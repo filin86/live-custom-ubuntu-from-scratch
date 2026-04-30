@@ -82,7 +82,57 @@ systemctl stop panel-check-updates.timer panel-check-updates.service || true
 
 Это защищает от параллельного `rauc install` со стороны агента обновлений.
 
-## 5. Установить RAUC-пакет
+## 5. Проверить EFI-записи
+
+Сначала убедитесь, что в `/etc/rauc/system.conf` нет неподдерживаемых ключей
+`efi-loader` и `efi-cmdline`. Если они были добавлены вручную при отладке,
+RAUC не сможет выполнить даже `rauc info`:
+
+```bash
+sed -i '/^efi-loader=/d;/^efi-cmdline=/d' /etc/rauc/system.conf
+systemctl restart rauc.service || true
+```
+
+Перед обновлением с версии `2026.04.24.1` обязательно проверьте, что UEFI-записи
+`system0` и `system1` содержат `root=PARTLABEL=...`:
+
+```bash
+efibootmgr -v | grep -E 'system0|system1'
+```
+
+Если записей нет или в них нет `initrd=... root=... rootfstype=squashfs`,
+`rauc install` сможет выставить BootNext, но ядро нового слота не найдёт rootfs
+и уйдёт в panic. Исправьте EFI-записи до запуска `rauc install`:
+
+```bash
+EFI_A=/dev/disk/by-partlabel/efi_A
+EFI_B=/dev/disk/by-partlabel/efi_B
+DISK="/dev/$(lsblk -no PKNAME "$EFI_A" | head -n1 | tr -d '[:space:]')"
+EFI_A_PART="$(lsblk -dn -o PARTN "$EFI_A" | tr -d '[:space:]')"
+EFI_B_PART="$(lsblk -dn -o PARTN "$EFI_B" | tr -d '[:space:]')"
+
+for bootnum in $(efibootmgr -v | awk '/system0|system1/ { sub(/^Boot/, "", $1); sub(/\*$/, "", $1); print $1 }'); do
+    efibootmgr --bootnum "$bootnum" --delete-bootnum
+done
+
+efibootmgr --create --disk "$DISK" --part "$EFI_A_PART" \
+    --label system0 \
+    --loader '\EFI\BOOT\BOOTX64.EFI' \
+    --unicode 'initrd=\EFI\Linux\initrd.img rauc.slot=system0 root=PARTLABEL=rootfs_A rootfstype=squashfs ro quiet panic=30'
+
+efibootmgr --create --disk "$DISK" --part "$EFI_B_PART" \
+    --label system1 \
+    --loader '\EFI\BOOT\BOOTX64.EFI' \
+    --unicode 'initrd=\EFI\Linux\initrd.img rauc.slot=system1 root=PARTLABEL=rootfs_B rootfstype=squashfs ro quiet panic=30'
+
+efibootmgr -v | grep -E 'system0|system1'
+```
+
+RAUC не принимает `efi-loader`/`efi-cmdline` в `/etc/rauc/system.conf`.
+Для EFI backend он использует `bootname=system0/system1` и переключает уже
+существующие UEFI-записи через BootNext.
+
+## 6. Установить RAUC-пакет
 
 ```bash
 systemctl start rauc.service
@@ -94,7 +144,7 @@ systemctl reboot
 `rauc install` пишет только в неактивный слот. Текущий загруженный слот не
 перезаписывается и остаётся точкой отката.
 
-## 6. Проверить после перезагрузки
+## 7. Проверить после перезагрузки
 
 После возврата панели:
 
@@ -121,7 +171,7 @@ journalctl -u rauc-mark-boot-good.service -b --no-pager
 systemctl start panel-check-updates.timer
 ```
 
-## 7. Если новая версия не загрузилась или проверка упала
+## 8. Если новая версия не загрузилась или проверка упала
 
 Если новый слот не дошёл до `rauc status mark-good booted`, следующая
 перезагрузка должна вернуть панель на предыдущий исправный слот:

@@ -574,26 +574,8 @@ part_number_for_device() {
     printf '%s\n' "$part_num"
 }
 
-partuuid_for_device() {
-    local part="$1"
-    local label="${2:-}"
-    local partuuid
-
-    if is_dry_run; then
-        [[ -n "$label" ]] || return 1
-        printf 'DRYRUN-PARTUUID-%s\n' "$label"
-        return 0
-    fi
-
-    partuuid="$(blkid -s PARTUUID -o value "$part" 2>/dev/null | tr -d '[:space:]' || true)"
-    [[ -n "$partuuid" ]] || return 1
-    printf '%s\n' "$partuuid"
-}
-
 EFI_A_PART="$(part_number_for_device "$EFI_A_DEV" efi_A)" || fail "не удалось определить partition # для efi_A"
 EFI_B_PART="$(part_number_for_device "$EFI_B_DEV" efi_B)" || fail "не удалось определить partition # для efi_B"
-ROOTFS_A_PARTUUID="$(partuuid_for_device "$ROOTFS_A_DEV" rootfs_A)" || fail "не удалось определить PARTUUID для rootfs_A"
-ROOTFS_B_PARTUUID="$(partuuid_for_device "$ROOTFS_B_DEV" rootfs_B)" || fail "не удалось определить PARTUUID для rootfs_B"
 
 log "регистрирую UEFI boot entries на $TARGET_DEVICE (efi_A=$EFI_A_PART, efi_B=$EFI_B_PART)"
 
@@ -619,11 +601,11 @@ remove_existing_entry "system1"
 
 LOADER_PATH='\EFI\BOOT\BOOTX64.EFI'
 # EFI stub должен получить cmdline, с которым kernel может смонтировать
-# squashfs root даже если initramfs не поднялся. Поэтому root= задаём через
-# PARTUUID, а не через /dev/disk/by-partlabel/* (такие symlink'и доступны
-# только после userspace/udev).
-CMDLINE_A="initrd=\\EFI\\Linux\\initrd.img rauc.slot=system0 root=PARTUUID=${ROOTFS_A_PARTUUID} rootfstype=squashfs ro quiet panic=30"
-CMDLINE_B="initrd=\\EFI\\Linux\\initrd.img rauc.slot=system1 root=PARTUUID=${ROOTFS_B_PARTUUID} rootfstype=squashfs ro quiet panic=30"
+# squashfs root даже если initramfs не поднялся. PARTLABEL понимается ядром
+# напрямую и совпадает с RAUC system.conf, в отличие от udev symlink'ов
+# /dev/disk/by-partlabel/*.
+CMDLINE_A="initrd=\\EFI\\Linux\\initrd.img rauc.slot=system0 root=PARTLABEL=rootfs_A rootfstype=squashfs ro quiet panic=30"
+CMDLINE_B="initrd=\\EFI\\Linux\\initrd.img rauc.slot=system1 root=PARTLABEL=rootfs_B rootfstype=squashfs ro quiet panic=30"
 
 run efibootmgr \
     --create \

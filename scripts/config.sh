@@ -396,11 +396,7 @@ function net_config() {
 
 function ensure_network_manager_renderer() {
     mkdir -p /etc/netplan
-    cat <<EOF_NETPLAN > /etc/netplan/01-network-manager-all.yaml
-network:
-  version: 2
-  renderer: NetworkManager
-EOF_NETPLAN
+    rm -f /etc/netplan/*.yaml /etc/netplan/*.yml
 }
 
 function configure_autologin() {
