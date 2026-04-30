@@ -15,6 +15,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 build_number="${1:-1}"
 # Если первый аргумент — флаг (не число), считаем N=1 и ничего не сдвигаем
@@ -29,6 +30,17 @@ bundle_version="$(date +%Y.%m.%d).${build_number}"
 
 echo "RAUC_BUNDLE_VERSION=${bundle_version}" >&2
 
+for pki_file in \
+    "$REPO_ROOT/pki/prod-signing.crt" \
+    "$REPO_ROOT/pki/prod-signing.key" \
+    "$REPO_ROOT/pki/prod-keyring.pem"
+do
+    if [[ ! -f "$pki_file" ]]; then
+        echo "ERROR: production PKI file not found: $pki_file" >&2
+        exit 1
+    fi
+done
+
 # prod-override: эти переменные принудительно перекрывают любые значения
 # из config.sh/окружения и фиксируют prod-пути PKI внутри builder-контейнера.
 RAUC_BUNDLE_VERSION="$bundle_version" \
@@ -38,5 +50,6 @@ TARGET_PLATFORM=pc-efi \
 TARGET_ARCH=amd64 \
 RAUC_SIGNING_CERT=/workspace/pki/prod-signing.crt \
 RAUC_SIGNING_KEY=/workspace/pki/prod-signing.key \
+RAUC_KEYRING_PATH=/workspace/pki/prod-keyring.pem \
 INSTALLER_KEYRING_SRC=/workspace/pki/prod-keyring.pem \
 exec "$SCRIPT_DIR/build-rauc-installer.sh" "$@"

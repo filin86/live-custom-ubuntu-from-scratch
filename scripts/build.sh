@@ -512,9 +512,22 @@ function prechroot() {
     # Keyring для RAUC target'а. Копируется только при TARGET_FORMAT=rauc,
     # чтобы не путать ISO-сборки присутствием секрет-подобного артефакта.
     if [[ "${TARGET_FORMAT:-iso}" == "rauc" ]]; then
-        local keyring_src="${RAUC_KEYRING_PATH:-$SCRIPT_DIR/../pki/dev-keyring.pem}"
+        local keyring_src="${RAUC_KEYRING_PATH:-}"
+        if [[ -z "$keyring_src" ]]; then
+            if [[ "${RAUC_VERSION_MODE:-release}" == "release" ]]; then
+                >&2 echo "ERROR: RAUC_KEYRING_PATH обязателен для release RAUC-сборки."
+                >&2 echo "       Иначе rootfs получит dev-keyring и не сможет установить prod-подписанные bundle'ы."
+                exit 1
+            fi
+            keyring_src="$SCRIPT_DIR/../pki/dev-keyring.pem"
+        fi
         if [[ ! -f "$keyring_src" ]]; then
-            >&2 echo "ERROR: RAUC_KEYRING_PATH='$keyring_src' отсутствует; для dev-сборок запустите pki/generate-dev-keys.sh"
+            >&2 echo "ERROR: RAUC keyring не найден: $keyring_src"
+            if [[ "${RAUC_VERSION_MODE:-release}" != "release" ]]; then
+                >&2 echo "       Для dev-сборок запустите pki/generate-dev-keys.sh."
+            else
+                >&2 echo "       Для release-сборок передайте prod keyring через RAUC_KEYRING_PATH."
+            fi
             exit 1
         fi
         as_root install -D -m 0644 "$keyring_src" chroot/root/rauc-keyring.pem
