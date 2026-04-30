@@ -64,6 +64,8 @@ function install_pinned_rauc() {
 function net_config() {
     apt-get install -y netplan.io util-linux network-manager
     systemctl enable NetworkManager.service
+    systemctl disable systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service || true
+    systemctl mask systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service || true
 }
 
 function ensure_network_manager_renderer() {
