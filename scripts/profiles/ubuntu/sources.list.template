@@ -1,0 +1,8 @@
+deb $TARGET_MIRROR $TARGET_VERSION main restricted universe multiverse
+deb-src $TARGET_MIRROR $TARGET_VERSION main restricted universe multiverse
+
+deb $TARGET_MIRROR $TARGET_VERSION-security main restricted universe multiverse
+deb-src $TARGET_MIRROR $TARGET_VERSION-security main restricted universe multiverse
+
+deb $TARGET_MIRROR $TARGET_VERSION-updates main restricted universe multiverse
+deb-src $TARGET_MIRROR $TARGET_VERSION-updates main restricted universe multiverse

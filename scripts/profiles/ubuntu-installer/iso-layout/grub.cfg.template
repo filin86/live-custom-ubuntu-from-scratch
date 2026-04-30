@@ -1,0 +1,30 @@
+search --set=root --file /ubuntu
+
+insmod all_video
+
+set default="0"
+set timeout=5
+
+menuentry "Inauto Panel Installer" {
+    linux /$LIVE_BOOT_DIR/vmlinuz boot=casper $LIVE_BOOT_ARGS ---
+    initrd /$LIVE_BOOT_DIR/initrd
+}
+
+menuentry "Check disc for defects" {
+    linux /$LIVE_BOOT_DIR/vmlinuz boot=casper integrity-check quiet splash ---
+    initrd /$LIVE_BOOT_DIR/initrd
+}
+
+menuentry "Test memory Memtest86+ (BIOS)" {
+    linux16 /install/memtest86+.bin
+}
+
+grub_platform
+if [ "$grub_platform" = "efi" ]; then
+menuentry "Test memory Memtest86+ (UEFI, long load time)" {
+    linux /install/memtest86+.efi
+}
+menuentry 'UEFI Firmware Settings' {
+    fwsetup
+}
+fi

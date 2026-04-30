@@ -1,0 +1,93 @@
+# U-Boot boot script template для RAUC A/B tablet target.
+#
+# ВНИМАНИЕ: это СКЕЛЕТ. Production-ready boot.scr требует board-specific
+# работы от vendor'а BSP. См. docs/tablet-port/uboot-integration.md.
+#
+# Предполагается, что U-Boot прошит со встроенными bootcount / altbootcmd
+# или эквивалентной логикой. RAUC ожидает следующие переменные U-Boot env:
+#
+#   BOOT_ORDER        "A B"  или  "B A"   — предпочитаемый порядок.
+#   BOOT_A_LEFT       число попыток осталось для слота A (0..3).
+#   BOOT_B_LEFT       число попыток осталось для слота B (0..3).
+#
+# Поведение:
+#   1. Прогоняем BOOT_ORDER слева направо.
+#   2. Первый slot с BOOT_<slot>_LEFT > 0 — выбран.
+#   3. Декрементируем его BOOT_<slot>_LEFT до kernel'а. После успешного
+#      boot'а + mark-good RAUC восстановит BOOT_<slot>_LEFT=3.
+#   4. Собираем bootargs с rauc.slot=<slot> и root=PARTLABEL=rootfs_<slot>.
+#
+# @BOARD@          — board-specific идентификатор (vendor заполняет).
+# @DTB_PATH@       — путь к .dtb внутри boot_<slot>/.
+# @KERNEL_NAME@    — имя kernel-образа (Image, zImage, vmlinuz-<ver>).
+# @INITRD_NAME@    — имя initrd (initrd.img, uInitrd).
+
+# =========== Нижеприведённое — illustrative; верифицируйте на реальной плате ===========
+
+# Сбросить локальные переменные.
+setenv bootargs ""
+setenv slot ""
+setenv partlabel ""
+
+# Инициализация env при первом boot'е (будет no-op если переменные есть).
+test -n "${BOOT_ORDER}"   || setenv BOOT_ORDER  "A B"
+test -n "${BOOT_A_LEFT}"  || setenv BOOT_A_LEFT  3
+test -n "${BOOT_B_LEFT}"  || setenv BOOT_B_LEFT  3
+
+# Выбираем первый slot с LEFT > 0.
+for candidate in ${BOOT_ORDER}; do
+    left_var="BOOT_${candidate}_LEFT"
+    left_val=${${left_var}}  # U-Boot indirection, см. note ниже
+    if test ${left_val} -gt 0; then
+        setenv slot "${candidate}"
+        break
+    fi
+done
+
+if test -z "${slot}"; then
+    echo "RAUC: все slot'ы исчерпали BOOT_*_LEFT; fallback на A"
+    setenv slot "A"
+    setenv BOOT_A_LEFT 3
+fi
+
+# Декрементируем left для выбранного slot'а. U-Boot не имеет арифметики на
+# произвольные переменные — нужна явная проверка. В реальном скрипте это
+# делается сравнениями.
+if test "${slot}" = "A"; then
+    setexpr BOOT_A_LEFT ${BOOT_A_LEFT} - 1
+    setenv partlabel "rootfs_A"
+    setenv bootdev   "boot_A"
+else
+    setexpr BOOT_B_LEFT ${BOOT_B_LEFT} - 1
+    setenv partlabel "rootfs_B"
+    setenv bootdev   "boot_B"
+fi
+
+saveenv
+
+# Загружаем kernel + initrd + DTB из нужной boot-партиции.
+# Способ load'а зависит от платы (mmc, ubi, nand); пример для eMMC:
+#
+#   load mmc 0:<boot_<slot>_part_num> ${kernel_addr_r} @KERNEL_NAME@
+#   load mmc 0:<boot_<slot>_part_num> ${ramdisk_addr_r} @INITRD_NAME@
+#   load mmc 0:<boot_<slot>_part_num> ${fdt_addr_r}     @DTB_PATH@
+#
+# Vendor BSP должен подставить корректные device/partition indices.
+
+# Формируем kernel cmdline.
+# initramfs-скрипт panel-boot ожидает root= и rauc.slot=.
+# inauto.overlay_size= опционален (дефолт 2G в initramfs).
+setenv bootargs "root=/dev/disk/by-partlabel/${partlabel} rootfstype=squashfs ro rauc.slot=${slot} panic=30 console=ttyS0,115200 earlycon"
+
+# booti / bootm / bootz — зависит от arch и формата kernel.
+# AArch64 + Image:
+#
+#   booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
+#
+# ARMv7 + zImage:
+#
+#   bootz ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
+#
+# Конкретную команду — подставляет vendor.
+
+echo "RAUC: boot slot=${slot} BOOT_A_LEFT=${BOOT_A_LEFT} BOOT_B_LEFT=${BOOT_B_LEFT}"

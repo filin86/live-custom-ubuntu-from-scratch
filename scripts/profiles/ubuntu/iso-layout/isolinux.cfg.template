@@ -1,0 +1,19 @@
+UI vesamenu.c32
+
+MENU TITLE Inautomatic Ubuntu Boot Menu
+DEFAULT live
+TIMEOUT 30
+
+LABEL live
+    MENU LABEL Boot Inautomatic Ubuntu
+    KERNEL /$LIVE_BOOT_DIR/vmlinuz
+    APPEND initrd=/$LIVE_BOOT_DIR/initrd boot=casper $LIVE_BOOT_ARGS ---
+
+LABEL check
+    MENU LABEL Check disc for defects
+    KERNEL /$LIVE_BOOT_DIR/vmlinuz
+    APPEND initrd=/$LIVE_BOOT_DIR/initrd boot=casper integrity-check quiet splash ---
+
+LABEL memtest
+    MENU LABEL Test memory Memtest86+
+    KERNEL /install/memtest86+.bin

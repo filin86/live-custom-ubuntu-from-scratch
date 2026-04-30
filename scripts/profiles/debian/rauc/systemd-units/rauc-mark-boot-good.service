@@ -1,0 +1,14 @@
+[Unit]
+Description=Mark current RAUC slot as good after successful boot
+After=multi-user.target network-online.target docker.service lightdm.service MountHome.service
+Requires=MountHome.service docker.service lightdm.service
+ConditionPathExists=/usr/bin/rauc
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/local/bin/panel-healthcheck.sh
+ExecStart=/usr/bin/rauc status mark-good booted
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

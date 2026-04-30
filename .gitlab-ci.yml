@@ -1,0 +1,252 @@
+# GitLab CI/CD pipeline для сборки immutable panel firmware (RAUC target).
+#
+# Runner requirements:
+#   - shell executor на dedicated build-host (не Docker/Kubernetes);
+#   - установленный docker с правом privileged-контейнеров;
+#   - runner tag "rauc-builder" (см. tags: ниже);
+#   - достаточно места под Docker volume <repo>-chroot-<distro>.
+#
+# Если у вас Docker executor — нужен docker:dind service с privileged=true;
+# соответствующий пример закомментирован в job'е build.
+#
+# Требуемые CI/CD variables (Project → Settings → CI/CD → Variables):
+#
+#   RAUC_SIGNING_CERT         File   signing X.509 cert (PEM)
+#   RAUC_SIGNING_KEY          File   signing private key (PEM), masked
+#   RAUC_INTERMEDIATE_CERT    File   (optional) intermediate cert
+#   RAUC_KEYRING              File   PEM keyring (root CA) — попадает в rootfs
+#                                     (/etc/rauc/keyring.pem) и в installer
+#                                     payload. В dev/release **должен** быть
+#                                     public cert root CA, которым подписан
+#                                     RAUC_SIGNING_CERT, иначе установленная
+#                                     система не доверяет prod bundle'ам.
+#   UPDATE_SERVER_URL         Var    например, https://panels.example.com
+#   UPDATE_SERVER_DEPLOY_TOKEN Var    masked, bearer token для /api/upload
+#
+# Все File-type переменные автоматически материализуются как временные
+# файлы; имя переменной — путь к файлу. Keys НЕ печатать в job-логах.
+
+workflow:
+  rules:
+    # Тег формата vYYYY.MM.DD.N — production release.
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$/'
+    # Ручной запуск через UI ("Run pipeline").
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    # MR — только валидация, без publish (см. rules в publish job'е).
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+stages:
+  - validate
+  - build
+  - publish
+
+variables:
+  # RAUC target parameters. Переопределяемы через UI "Run pipeline".
+  TARGET_FORMAT:      "rauc"
+  TARGET_PLATFORM:    "pc-efi"
+  TARGET_ARCH:        "amd64"
+  # Пересобираем builder-образ один раз за pipeline (cache invalidation через matrix'ы).
+  REBUILD_BUILDER:    "1"
+  # Для local-dev push'ей через UI — разрешаем dev.* версию.
+  RAUC_VERSION_MODE:  "release"
+
+default:
+  tags:
+    - rauc-builder
+  # На случай ошибки docker-network — быстро давать runner'у отпустить job.
+  timeout: 2h
+
+# -----------------------------------------------------------------------------
+# 1. Validate version format
+# -----------------------------------------------------------------------------
+
+validate-version:
+  stage: validate
+  script:
+    - set -eu
+    - |
+      if [[ -n "${CI_COMMIT_TAG:-}" ]]; then
+        version="${CI_COMMIT_TAG#v}"
+        mode="release"
+      elif [[ -n "${RAUC_BUNDLE_VERSION:-}" ]]; then
+        version="$RAUC_BUNDLE_VERSION"
+        if [[ "$version" == dev.* ]]; then
+          mode="dev-ok"
+        else
+          mode="release"
+        fi
+      else
+        echo "RAUC_BUNDLE_VERSION обязателен при ручном запуске (формат YYYY.MM.DD.N или dev.YYYY.MM.DD.N)"
+        exit 1
+      fi
+    - |
+      if [[ "$mode" == "release" ]]; then
+        [[ "$version" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]] \
+          || { echo "release version must match YYYY.MM.DD.N (got '$version')"; exit 1; }
+      else
+        [[ "$version" =~ ^dev\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]] \
+          || { echo "dev version must match dev.YYYY.MM.DD.N (got '$version')"; exit 1; }
+      fi
+    - echo "validated version='$version' mode='$mode'"
+    - echo "RAUC_BUNDLE_VERSION=$version" > version.env
+    - echo "RAUC_VERSION_MODE=$mode"     >> version.env
+  artifacts:
+    reports:
+      dotenv: version.env
+
+# -----------------------------------------------------------------------------
+# 2. Build RAUC bundle + installer payload
+# -----------------------------------------------------------------------------
+
+build-bundle:
+  stage: build
+  needs:
+    - job: validate-version
+      artifacts: true
+  parallel:
+    matrix:
+      - TARGET_DISTRO: ubuntu
+        TARGET_ARCH:   amd64
+        TARGET_PLATFORM: pc-efi
+      - TARGET_DISTRO: debian
+        TARGET_ARCH:   amd64
+        TARGET_PLATFORM: pc-efi
+  # Для Docker executor раскомментируйте и смените tags на свой privileged-runner:
+  # image: docker:27-cli
+  # services:
+  #   - name: docker:27-dind
+  #     command: ["--tls=false"]
+  # variables:
+  #   DOCKER_HOST: tcp://docker:2375
+  #   DOCKER_TLS_CERTDIR: ""
+  script:
+    # Весь build-flow — один bash-блок. trap 'rm -rf .tmp/pki' EXIT
+    # выставляется СРАЗУ после создания директории с ключами: при любом
+    # выходе (success / exit 1 / set -e failure / SIGTERM от timeout'а)
+    # private key удаляется до того, как runner продолжит с другими
+    # job'ами. Отдельный post-step был бы no-op при упавшем build'е.
+    #
+    # after_script: (ниже) — defence-in-depth: GitLab гарантирует его
+    # выполнение даже если весь script timed out до EXIT-trap'а.
+    - |
+      set -euo pipefail
+
+      echo "building $TARGET_DISTRO/$TARGET_ARCH/$TARGET_PLATFORM version=$RAUC_BUNDLE_VERSION mode=$RAUC_VERSION_MODE"
+
+      # File-type variables хранятся GitLab'ом в /builds/<tmp>/… — вне
+      # $CI_PROJECT_DIR, который bind-mount'ится build-in-docker.sh в
+      # /workspace. Копируем файлы внутрь $CI_PROJECT_DIR/.tmp/pki/ и
+      # переопределяем переменные на paths, доступные внутри контейнера.
+      mkdir -p .tmp/pki
+      chmod 0700 .tmp/pki
+      trap 'rm -rf .tmp/pki' EXIT
+
+      if [[ -n "${RAUC_SIGNING_CERT:-}" && -n "${RAUC_SIGNING_KEY:-}" && -f "${RAUC_SIGNING_CERT}" && -f "${RAUC_SIGNING_KEY}" ]]; then
+        echo "using prod signing keypair from CI File variables"
+        install -m 0644 "$RAUC_SIGNING_CERT" .tmp/pki/signing.crt
+        install -m 0600 "$RAUC_SIGNING_KEY"  .tmp/pki/signing.key
+        export RAUC_SIGNING_CERT="/workspace/.tmp/pki/signing.crt"
+        export RAUC_SIGNING_KEY="/workspace/.tmp/pki/signing.key"
+        if [[ -n "${RAUC_INTERMEDIATE_CERT:-}" && -f "${RAUC_INTERMEDIATE_CERT}" ]]; then
+          install -m 0644 "$RAUC_INTERMEDIATE_CERT" .tmp/pki/intermediate.crt
+          export RAUC_INTERMEDIATE_CERT="/workspace/.tmp/pki/intermediate.crt"
+        fi
+        # Prod keyring ОБЯЗАТЕЛЕН в release mode: попадает в /etc/rauc/keyring.pem
+        # установленной системы и в installer payload. Без него panel доверяет
+        # только dev-ключам и все prod bundle'ы будут отвергнуты.
+        if [[ -n "${RAUC_KEYRING:-}" && -f "${RAUC_KEYRING}" ]]; then
+          install -m 0644 "$RAUC_KEYRING" .tmp/pki/keyring.pem
+          export RAUC_KEYRING_PATH="/workspace/.tmp/pki/keyring.pem"
+          export INSTALLER_KEYRING_SRC="/workspace/.tmp/pki/keyring.pem"
+        else
+          echo "RAUC_SIGNING_CERT/KEY заданы, но RAUC_KEYRING отсутствует — rootfs и installer получили бы dev-keyring, отвергая prod подпись. Прерываю."
+          exit 1
+        fi
+      else
+        echo "WARNING: prod signing secrets отсутствуют — fallback на pki/dev-signing.*"
+        if [[ "$RAUC_VERSION_MODE" != "dev-ok" ]]; then
+          echo "release mode без signing secrets — прерываю"
+          exit 1
+        fi
+        [[ -x pki/generate-dev-keys.sh ]] && pki/generate-dev-keys.sh
+        export RAUC_SIGNING_CERT="/workspace/pki/dev-signing.crt"
+        export RAUC_SIGNING_KEY="/workspace/pki/dev-signing.key"
+        export RAUC_KEYRING_PATH="/workspace/pki/dev-keyring.pem"
+        export INSTALLER_KEYRING_SRC="/workspace/pki/dev-keyring.pem"
+      fi
+
+      # build.sh::CMD содержит build_installer_image после build_rauc_bundle,
+      # так что bundle и installer payload собираются в одном wrapper-запуске.
+      # Никаких heredoc'ов через --shell в non-TTY CI.
+      ./scripts/build-in-docker.sh -
+
+      ls -lh out/
+
+      # Имя артефакта содержит все matrix-оси, чтобы parallel job'ы не
+      # путали чужие bundle'ы (один ubuntu, другой debian).
+      expected="out/inauto-panel-${TARGET_DISTRO}-${TARGET_ARCH}-${TARGET_PLATFORM}-${RAUC_BUNDLE_VERSION}.raucb"
+      installer="out/inauto-panel-installer-${TARGET_DISTRO}-${TARGET_ARCH}-${TARGET_PLATFORM}-${RAUC_BUNDLE_VERSION}.tar.zst"
+      [[ -f "$expected" ]]  || { echo "bundle не найден: $expected"; exit 1; }
+      [[ -f "$installer" ]] || { echo "installer не найден: $installer"; exit 1; }
+      echo "BUNDLE=$expected"  >  build.env
+      echo "INSTALLER=$installer" >> build.env
+
+      # EXIT-trap удалит .tmp/pki; явный rm ниже — на случай, если runner
+      # зачем-то перезапустит script-step без выхода из bash-процесса.
+      rm -rf .tmp/pki
+  after_script:
+    # Defence-in-depth: GitLab гарантирует выполнение after_script'а даже
+    # при job timeout / forced cancel, когда EXIT-trap мог не отработать.
+    # `|| true` — after_script не должен менять финальный exit code job'а.
+    - rm -rf .tmp/pki || true
+  artifacts:
+    name: "rauc-${TARGET_DISTRO}-${TARGET_ARCH}-${TARGET_PLATFORM}-${RAUC_BUNDLE_VERSION}"
+    paths:
+      - out/inauto-panel-*.raucb
+      - out/inauto-panel-*.raucb.sha256
+      - out/inauto-panel-installer-*.tar.zst
+      - out/inauto-panel-installer-*.tar.zst.sha256
+    expire_in: 30 days
+    reports:
+      dotenv: build.env
+    when: on_success
+
+# -----------------------------------------------------------------------------
+# 3. Publish в update-server (candidate-channel)
+# -----------------------------------------------------------------------------
+# Срабатывает на push-tag или при ручном запуске с PUBLISH_CANDIDATE=true.
+
+publish-candidate:
+  stage: publish
+  needs:
+    - job: build-bundle
+      artifacts: true
+  parallel:
+    matrix:
+      - TARGET_DISTRO: ubuntu
+        TARGET_ARCH:   amd64
+        TARGET_PLATFORM: pc-efi
+      - TARGET_DISTRO: debian
+        TARGET_ARCH:   amd64
+        TARGET_PLATFORM: pc-efi
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$/'
+    - if: '$PUBLISH_CANDIDATE == "true"'
+  script:
+    - set -eu
+    - |
+      if [[ -z "${UPDATE_SERVER_URL:-}" || -z "${UPDATE_SERVER_DEPLOY_TOKEN:-}" ]]; then
+        echo "UPDATE_SERVER_URL / UPDATE_SERVER_DEPLOY_TOKEN не заданы — publish пропущен"
+        exit 0
+      fi
+    - |
+      # Явный шаблон с всеми matrix-осями — каждый parallel job публикует
+      # ровно свой distro/arch/platform bundle, без коллизий.
+      bundle="out/inauto-panel-${TARGET_DISTRO}-${TARGET_ARCH}-${TARGET_PLATFORM}-${RAUC_BUNDLE_VERSION}.raucb"
+      [[ -f "$bundle" ]] || { echo "bundle не найден: $bundle"; exit 1; }
+      echo "uploading $bundle в candidate на ${UPDATE_SERVER_URL}"
+      curl -fsS --max-time 300 \
+        -H "Authorization: Bearer $UPDATE_SERVER_DEPLOY_TOKEN" \
+        -F "file=@${bundle}" \
+        -F "channel=candidate" \
+        "${UPDATE_SERVER_URL%/}/api/upload"

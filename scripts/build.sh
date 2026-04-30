@@ -6,105 +6,468 @@ set -u                  # treat unset variable as error
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 
-CMD=(setup_host debootstrap prechroot chr_setup_host chr_install_pkg chr_customize_image chr_custom_conf chr_postpkginst chr_build_image chr_finish_up postchroot build_iso)
+CMD=(setup_host debootstrap prechroot chr_setup_host chr_install_pkg chr_customize_image chr_custom_conf chr_postpkginst scan_vulnerabilities chr_build_image chr_finish_up postchroot build_iso build_rauc_bundle build_installer_image build_rauc_installer_iso)
 
-DATE=`TZ="UTC" date +"%y%m%d-%H%M%S"`
+DATE="$(TZ="UTC" date +"%y%m%d-%H%M%S")"
+ROOT_CMD=()
+
+function as_root() {
+    if [[ ${#ROOT_CMD[@]} -eq 0 ]]; then
+        "$@"
+    else
+        "${ROOT_CMD[@]}" "$@"
+    fi
+}
+
+function require_sudo() {
+    if ! command -v sudo >/dev/null 2>&1; then
+        >&2 echo "ERROR: sudo is required when running build.sh as a non-root user."
+        >&2 echo "Install sudo, or rerun inside a container with ALLOW_ROOT=1."
+        exit 1
+    fi
+}
 
 function help() {
     # if $1 is set, use $1 as headline message in help()
-    if [ -z ${1+x} ]; then
-        echo -e "This script builds a bootable ubuntu ISO image"
-        echo -e
+    if [[ -z "${1+x}" ]]; then
+        printf '%s\n\n' "This script builds a bootable ubuntu ISO image"
     else
-        echo -e $1
-        echo
+        printf '%s\n\n' "$1"
     fi
-    echo -e "Supported commands : ${CMD[*]}"
-    echo -e
-    echo -e "Syntax: $0 [start_cmd] [-] [end_cmd]"
-    echo -e "\trun from start_cmd to end_end"
-    echo -e "\tif start_cmd is omitted, start from first command"
-    echo -e "\tif end_cmd is omitted, end with last command"
-    echo -e "\tenter single cmd to run the specific command"
-    echo -e "\tenter '-' as only argument to run all commands"
-    echo -e
+    printf '%s\n\n' "Supported commands : ${CMD[*]}"
+    printf '%s\n' "Syntax: $0 [start_cmd] [-] [end_cmd]"
+    printf '\t%s\n' "run from start_cmd to end_end"
+    printf '\t%s\n' "if start_cmd is omitted, start from first command"
+    printf '\t%s\n' "if end_cmd is omitted, end with last command"
+    printf '\t%s\n' "enter single cmd to run the specific command"
+    printf '\t%s\n\n' "enter '-' as only argument to run all commands"
     exit 0
 }
 
 function find_index() {
-    local ret;
     local i;
     for ((i=0; i<${#CMD[*]}; i++)); do
         if [ "${CMD[i]}" == "$1" ]; then
-            index=$i;
-            return;
+            printf '%s\n' "$i"
+            return 0
         fi
     done
-    help "Command not found : $1"
+    return 1
 }
 
 function chroot_enter_setup() {
-    sudo mount --bind /dev chroot/dev
-    sudo mount --bind /run chroot/run
-    sudo chroot chroot mount none -t proc /proc
-    sudo chroot chroot mount none -t sysfs /sys
-    sudo chroot chroot mount none -t devpts /dev/pts
+    if [[ -n "${LIVECD_APT_CACHE_DIR:-}" && -d "${LIVECD_APT_CACHE_DIR:-}" ]]; then
+        as_root mkdir -p chroot/var/cache/apt/archives
+        if ! as_root mountpoint -q chroot/var/cache/apt/archives; then
+            as_root mount --bind "$LIVECD_APT_CACHE_DIR" chroot/var/cache/apt/archives
+        fi
+        as_root mkdir -p chroot/var/cache/apt/archives/partial
+    fi
+
+    as_root mount --bind /dev chroot/dev
+    as_root mount --bind /run chroot/run
+    as_root chroot chroot mount none -t proc /proc
+    as_root chroot chroot mount none -t sysfs /sys
+    as_root chroot chroot mount none -t devpts /dev/pts
 }
 
 function chroot_exit_teardown() {
-    sudo chroot chroot umount /proc
-    sudo chroot chroot umount /sys
-    sudo chroot chroot umount /dev/pts
-    sudo umount chroot/dev
-    sudo umount chroot/run
+    as_root chroot chroot umount /proc
+    as_root chroot chroot umount /sys
+    as_root chroot chroot umount /dev/pts
+    as_root umount chroot/dev
+    as_root umount chroot/run
+    if as_root mountpoint -q chroot/var/cache/apt/archives; then
+        as_root umount chroot/var/cache/apt/archives
+    fi
 }
 
 function check_host() {
     local os_ver
-    os_ver=`lsb_release -i | grep -E "(Ubuntu|Debian)"`
+    local allow_root
+
+    os_ver=""
+    if command -v lsb_release >/dev/null 2>&1; then
+        os_ver=$(lsb_release -i 2>/dev/null | grep -E "(Ubuntu|Debian)" || true)
+    fi
     if [[ -z "$os_ver" ]]; then
-        echo "WARNING : OS is not Debian or Ubuntu and is untested"
+        echo "WARNING : OS is not Debian or Ubuntu, or lsb_release is unavailable. This setup is untested."
     fi
 
-    if [ $(id -u) -eq 0 ]; then
-        echo "This script should not be run as 'root'"
+    allow_root="${ALLOW_ROOT:-0}"
+
+    if [ "$(id -u)" -eq 0 ]; then
+        if [[ "$allow_root" == "1" ]]; then
+            echo "WARNING : running as root because ALLOW_ROOT=1"
+            ROOT_CMD=()
+            return
+        fi
+        echo "This script should not be run as 'root'. Re-run as a regular user, or set ALLOW_ROOT=1 for a containerized build."
         exit 1
     fi
+
+    require_sudo
+    ROOT_CMD=(sudo)
 }
 
 # Load configuration values from file
 function load_config() {
-    if [[ -f "$SCRIPT_DIR/config.sh" ]]; then
-        . "$SCRIPT_DIR/config.sh"
-    elif [[ -f "$SCRIPT_DIR/default_config.sh" ]]; then
-        . "$SCRIPT_DIR/default_config.sh"
-    else
-        >&2 echo "Unable to find default config file  $SCRIPT_DIR/default_config.sh, aborting."
+    if [[ ! -f "$SCRIPT_DIR/config.sh" ]]; then
+        >&2 echo "ERROR: scripts/config.sh не найден. Создайте его на основе любого существующего конфига в этом репозитории."
         exit 1
     fi
+    . "$SCRIPT_DIR/config.sh"
 }
 
 # Verify that necessary configuration values are set and they are valid
 function check_config() {
     local expected_config_version
-    expected_config_version="0.4"
+    expected_config_version="0.6"
 
     if [[ "$CONFIG_FILE_VERSION" != "$expected_config_version" ]]; then
-        >&2 echo "Invalid or old config version $CONFIG_FILE_VERSION, expected $expected_config_version. Please update your configuration file from the default."
+        >&2 echo "Invalid or old config version $CONFIG_FILE_VERSION, expected $expected_config_version. Please update CONFIG_FILE_VERSION in your scripts/config.sh."
+        exit 1
+    fi
+
+    case "${TARGET_FORMAT:-iso}" in
+        iso|rauc) ;;
+        *)
+            >&2 echo "ERROR: TARGET_FORMAT must be 'iso' or 'rauc' (got: '${TARGET_FORMAT:-<unset>}')"
+            exit 1
+            ;;
+    esac
+
+    case "${INAUTO_IMAGE_ROLE:-panel}" in
+        panel|factory-installer) ;;
+        *)
+            >&2 echo "ERROR: INAUTO_IMAGE_ROLE must be 'panel' or 'factory-installer' (got: '${INAUTO_IMAGE_ROLE:-<unset>}')"
+            exit 1
+            ;;
+    esac
+
+    if [[ "${TARGET_FORMAT:-iso}" == "rauc" ]]; then
+        case "${TARGET_PLATFORM:-}" in
+            pc-efi) ;;
+            *-uboot)
+                >&2 echo "NOTE: TARGET_PLATFORM='$TARGET_PLATFORM' is a U-Boot tablet target; production support requires board-tested boot chain."
+                ;;
+            *)
+                >&2 echo "ERROR: TARGET_FORMAT=rauc requires TARGET_PLATFORM=pc-efi or <board>-uboot (got: '${TARGET_PLATFORM:-<unset>}')"
+                exit 1
+                ;;
+        esac
+    fi
+
+    TARGET_PROFILE="${TARGET_PROFILE:-${TARGET_DISTRO:-}}"
+    export TARGET_PROFILE
+
+    case "${TARGET_DISTRO:-}" in
+        ubuntu|debian) ;;
+        *)
+            >&2 echo "ERROR: TARGET_DISTRO must be 'ubuntu' or 'debian' (got: '${TARGET_DISTRO:-<unset>}')"
+            >&2 echo "       Use TARGET_PROFILE to select a build profile, for example TARGET_PROFILE=ubuntu-installer."
+            exit 1
+            ;;
+    esac
+
+    if [[ ! "$TARGET_PROFILE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        >&2 echo "ERROR: TARGET_PROFILE contains unsupported characters: '$TARGET_PROFILE'"
+        exit 1
+    fi
+
+    if [[ ! -d "$SCRIPT_DIR/profiles/$TARGET_PROFILE" ]]; then
+        >&2 echo "ERROR: profile directory missing: $SCRIPT_DIR/profiles/$TARGET_PROFILE"
         exit 1
     fi
 }
 
+function load_profile() {
+    PROFILE_DIR="$SCRIPT_DIR/profiles/$TARGET_PROFILE"
+
+    # shellcheck source=/dev/null
+    . "$PROFILE_DIR/profile.env"
+    # shellcheck source=/dev/null
+    . "$PROFILE_DIR/hooks.sh"
+
+    TARGET_VERSION="${!VERSION_VAR_NAME}"
+    TARGET_MIRROR="${!MIRROR_VAR_NAME}"
+
+    if [[ -z "$TARGET_VERSION" || -z "$TARGET_MIRROR" ]]; then
+        >&2 echo "ERROR: profile variable '$VERSION_VAR_NAME' or '$MIRROR_VAR_NAME' is empty"
+        exit 1
+    fi
+    EFI_GRUB_DIR="${EFI_GRUB_DIR:-ubuntu}"
+    if [[ ! "$EFI_GRUB_DIR" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        >&2 echo "ERROR: EFI_GRUB_DIR contains unsupported characters: '${EFI_GRUB_DIR:-}'"
+        exit 1
+    fi
+
+    export PROFILE_DIR TARGET_VERSION TARGET_MIRROR LIVE_BOOT_DIR LIVE_SQUASHFS_NAME DEBOOTSTRAP_COMPONENTS EFI_GRUB_DIR
+}
+
 function setup_host() {
     echo "=====> running setup_host ..."
-    sudo apt update
-    sudo apt install -y debootstrap squashfs-tools xorriso
-    sudo mkdir -p chroot
+    as_root apt update
+    as_root apt install -y debootstrap squashfs-tools xorriso binutils zstd jq
+    as_root mkdir -p chroot
 }
 
 function debootstrap() {
     echo "=====> running debootstrap ... will take a couple of minutes ..."
-    sudo debootstrap --arch=amd64 --variant=minbase $TARGET_UBUNTU_VERSION chroot $TARGET_UBUNTU_MIRROR
+    local extractor_args
+    local debootstrap_arch="${TARGET_ARCH:-amd64}"
+    extractor_args=()
+
+    if [[ -d chroot ]] && find chroot -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+        >&2 echo "ERROR: target directory 'chroot' is not empty."
+        >&2 echo "Remove it before restarting debootstrap, or resume the build from a later step."
+        exit 1
+    fi
+
+    if ! command -v zstd >/dev/null 2>&1; then
+        >&2 echo "ERROR: zstd is required by debootstrap to unpack modern Ubuntu .deb packages."
+        >&2 echo "Run './scripts/build.sh setup_host' or install the 'zstd' package on the host."
+        exit 1
+    fi
+
+    if dpkg-deb --version 2>&1 | grep -qi "busybox"; then
+        echo "WARNING: BusyBox dpkg-deb detected on host, forcing debootstrap extractor=ar"
+        extractor_args=(--extractor=ar)
+    fi
+
+    if [[ -n "${LIVECD_APT_CACHE_DIR:-}" && -d "${LIVECD_APT_CACHE_DIR:-}" ]]; then
+        as_root mkdir -p "$LIVECD_APT_CACHE_DIR/debootstrap"
+        extractor_args+=(--cache-dir="$LIVECD_APT_CACHE_DIR/debootstrap")
+    fi
+
+    if [[ ${#ROOT_CMD[@]} -eq 0 ]]; then
+        command debootstrap \
+            --verbose \
+            "${extractor_args[@]}" \
+            --arch="$debootstrap_arch" \
+            --variant=minbase \
+            --components="$DEBOOTSTRAP_COMPONENTS" \
+            --include=ca-certificates,gettext-base \
+            "$TARGET_VERSION" \
+            chroot \
+            "$TARGET_MIRROR"
+    else
+        "${ROOT_CMD[@]}" debootstrap \
+            --verbose \
+            "${extractor_args[@]}" \
+            --arch="$debootstrap_arch" \
+            --variant=minbase \
+            --components="$DEBOOTSTRAP_COMPONENTS" \
+            --include=ca-certificates,gettext-base \
+            "$TARGET_VERSION" \
+            chroot \
+            "$TARGET_MIRROR"
+    fi
+}
+
+function scan_vulnerabilities() {
+    echo "=====> running scan_vulnerabilities ..."
+
+    local report_root
+    local metadata_report
+    local package_inventory
+    local affected_packages
+    local trivy_json_report
+    local trivy_table_report
+    local vulnerability_tsv
+    local summary_report
+    local os_release_report
+    local repo_root
+    local trivy_ignorefile
+    local trivy_bin
+    local trivy_help
+    local trivy_version
+    local trivy_type_args
+    local trivy_common_args
+    local severity_filter
+    local scan_timeout
+    local ignore_args
+    local package_count
+    local result_count
+
+    repo_root="$(dirname "$SCRIPT_DIR")"
+    severity_filter="${VULN_SCAN_SEVERITIES:-UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL}"
+    scan_timeout="${VULN_SCAN_TIMEOUT:-15m}"
+    report_root="${VULN_REPORT_DIR:-$SCRIPT_DIR/reports/${TARGET_NAME}-${DATE}}"
+
+    metadata_report="$report_root/metadata.txt"
+    package_inventory="$report_root/packages.tsv"
+    affected_packages="$report_root/affected-packages.txt"
+    trivy_json_report="$report_root/trivy-rootfs.json"
+    trivy_table_report="$report_root/trivy-rootfs.txt"
+    vulnerability_tsv="$report_root/vulnerabilities.tsv"
+    summary_report="$report_root/summary.txt"
+    os_release_report="$report_root/os-release"
+    trivy_bin="${TRIVY_BIN:-trivy}"
+    ignore_args=()
+    trivy_type_args=()
+    trivy_common_args=()
+    trivy_ignorefile=""
+    trivy_help=""
+    trivy_version=""
+    package_count=0
+    result_count=0
+
+    if [[ ! -d chroot ]]; then
+        >&2 echo "ERROR: chroot directory does not exist. Run debootstrap and package customization first."
+        exit 1
+    fi
+
+    if [[ ! -f chroot/var/lib/dpkg/status ]]; then
+        >&2 echo "ERROR: chroot does not look like a prepared Ubuntu rootfs (missing var/lib/dpkg/status)."
+        exit 1
+    fi
+
+    if ! command -v "$trivy_bin" >/dev/null 2>&1; then
+        >&2 echo "ERROR: Trivy is required for the vulnerability report stage."
+        >&2 echo "Install Trivy on the build host or set TRIVY_BIN to the scanner path, then rerun './scripts/build.sh scan_vulnerabilities'."
+        exit 1
+    fi
+
+    if ! command -v jq >/dev/null 2>&1; then
+        >&2 echo "ERROR: jq is required to post-process the Trivy report."
+        >&2 echo "Run './scripts/build.sh setup_host' or install the 'jq' package on the host."
+        exit 1
+    fi
+
+    if ! trivy_help="$("$trivy_bin" rootfs --help 2>&1)"; then
+        >&2 echo "ERROR: unable to execute '$trivy_bin rootfs --help'."
+        >&2 printf '%s\n' "$trivy_help"
+        exit 1
+    fi
+
+    if grep -q -- '--pkg-types' <<< "$trivy_help"; then
+        trivy_type_args=(--pkg-types os)
+    elif grep -q -- '--vuln-type' <<< "$trivy_help"; then
+        trivy_type_args=(--vuln-type os)
+    fi
+
+    trivy_version="$("$trivy_bin" --version 2>&1 | head -n 1 || true)"
+
+    if [[ -f "$repo_root/.trivyignore" ]]; then
+        trivy_ignorefile="$repo_root/.trivyignore"
+    elif [[ -f "$SCRIPT_DIR/.trivyignore" ]]; then
+        trivy_ignorefile="$SCRIPT_DIR/.trivyignore"
+    fi
+
+    if [[ -n "$trivy_ignorefile" ]]; then
+        ignore_args=(--ignorefile "$trivy_ignorefile")
+    fi
+
+    mkdir -p "$report_root"
+
+    {
+        echo "target_name=$TARGET_NAME"
+        echo "target_distro=$TARGET_DISTRO"
+        echo "target_profile=$TARGET_PROFILE"
+        echo "target_version=$TARGET_VERSION"
+        echo "target_mirror=$TARGET_MIRROR"
+        echo "generated_at_utc=$(TZ=UTC date -Iseconds)"
+        echo "scan_timeout=$scan_timeout"
+        echo "severity_filter=$severity_filter"
+        echo "trivy_bin=$trivy_bin"
+        echo "trivy_version=$trivy_version"
+        if [[ -n "$trivy_ignorefile" ]]; then
+            echo "trivy_ignorefile=$trivy_ignorefile"
+        else
+            echo "trivy_ignorefile=<none>"
+        fi
+    } > "$metadata_report"
+
+    as_root cat chroot/etc/os-release > "$os_release_report"
+    {
+        printf 'package\tversion\tarchitecture\n'
+        as_root chroot chroot dpkg-query -W --showformat='${Package}\t${Version}\t${Architecture}\n' | sort
+    } > "$package_inventory"
+
+    package_count=$(tail -n +2 "$package_inventory" | wc -l | tr -d ' ')
+
+    trivy_common_args=(
+        rootfs
+        --scanners vuln
+        "${trivy_type_args[@]}"
+        --severity "$severity_filter"
+        --timeout "$scan_timeout"
+        "${ignore_args[@]}"
+    )
+
+    "$trivy_bin" "${trivy_common_args[@]}" \
+        --list-all-pkgs \
+        --format json \
+        --output "$trivy_json_report" \
+        chroot
+
+    "$trivy_bin" "${trivy_common_args[@]}" \
+        --format table \
+        --output "$trivy_table_report" \
+        chroot
+
+    result_count=$(jq '(.Results // []) | length' "$trivy_json_report")
+
+    if [[ "$result_count" -eq 0 && "$package_count" -gt 0 ]]; then
+        >&2 echo "WARNING: Trivy returned zero scan results for a rootfs with $package_count installed packages."
+        >&2 echo "WARNING: Treat this as an inconclusive scan, not as proof that the image has no CVEs."
+        >&2 echo "WARNING: Check Trivy version/DB and compare with a newer official Trivy build if possible."
+    fi
+
+    {
+        printf 'package\tinstalled_version\tseverity\tvulnerability_id\tfixed_version\tprimary_url\n'
+        jq -r '
+            [
+                .Results[]?.Vulnerabilities[]?
+                | [
+                    .PkgName,
+                    .InstalledVersion,
+                    .Severity,
+                    .VulnerabilityID,
+                    (.FixedVersion // ""),
+                    (.PrimaryURL // "")
+                ]
+            ]
+            | sort_by(.[0], .[2], .[3])
+            | .[]
+            | @tsv
+        ' "$trivy_json_report"
+    } > "$vulnerability_tsv"
+
+    jq -r '
+        [
+            .Results[]?.Vulnerabilities[]?.PkgName
+        ]
+        | map(select(. != null))
+        | unique
+        | .[]
+    ' "$trivy_json_report" > "$affected_packages"
+
+    jq -r '
+        def vulnerabilities:
+            [.Results[]?.Vulnerabilities[]?];
+        def severity_count(level):
+            (vulnerabilities | map(select(.Severity == level)) | length);
+        def has_fix:
+            ((.FixedVersion // "") | length) > 0;
+        [
+            "Report directory: '"$report_root"'",
+            "Total vulnerabilities: " + ((vulnerabilities | length) | tostring),
+            "Affected packages: " + (([.Results[]?.Vulnerabilities[]?.PkgName] | map(select(. != null)) | unique | length) | tostring),
+            "CRITICAL: " + (severity_count("CRITICAL") | tostring),
+            "HIGH: " + (severity_count("HIGH") | tostring),
+            "MEDIUM: " + (severity_count("MEDIUM") | tostring),
+            "LOW: " + (severity_count("LOW") | tostring),
+            "UNKNOWN: " + (severity_count("UNKNOWN") | tostring),
+            "Fixed version available: " + ((vulnerabilities | map(select(has_fix)) | length) | tostring),
+            "No fixed version reported: " + ((vulnerabilities | map(select(has_fix | not)) | length) | tostring),
+            "CRITICAL/HIGH with fixed version: " + ((vulnerabilities | map(select((.Severity == "CRITICAL" or .Severity == "HIGH") and has_fix)) | length) | tostring)
+        ]
+        | .[]
+    ' "$trivy_json_report" > "$summary_report"
+
+    cat "$summary_report"
 }
 
 function prechroot() {
@@ -113,76 +476,163 @@ function prechroot() {
     chroot_enter_setup
 
     # Setup build scripts in chroot environment
-    sudo ln -f $SCRIPT_DIR/chroot_build.sh chroot/root/chroot_build.sh
-    sudo ln -f $SCRIPT_DIR/default_config.sh chroot/root/default_config.sh
-    if [[ -f "$SCRIPT_DIR/config.sh" ]]; then
-        sudo ln -f $SCRIPT_DIR/config.sh chroot/root/config.sh
+    as_root install -m 0755 "$SCRIPT_DIR/chroot_build.sh" chroot/root/chroot_build.sh
+    if [[ "${INAUTO_IMAGE_ROLE:-panel}" == "factory-installer" && -f "$SCRIPT_DIR/config-installer.sh" ]]; then
+        as_root install -m 0644 "$SCRIPT_DIR/config-installer.sh" chroot/root/config.sh
+    elif [[ -f "$SCRIPT_DIR/config.sh" ]]; then
+        as_root install -m 0644 "$SCRIPT_DIR/config.sh" chroot/root/config.sh
+    fi
+    as_root install -m 0755 "$SCRIPT_DIR/targets/rauc/install-rauc-source.sh" \
+        chroot/root/install-rauc-source.sh
+
+    # Keep DNS inside the chroot aligned with the builder container. This is
+    # especially important when Docker uses host networking or custom DNS.
+    if [[ -f /etc/resolv.conf ]]; then
+        as_root rm -f chroot/etc/resolv.conf
+        as_root install -m 0644 /etc/resolv.conf chroot/etc/resolv.conf
     fi
 
+    # Install profile files inside chroot for chroot_build.sh to consume.
+    as_root install -d -m 0755 chroot/root/profile
+    as_root install -d -m 0755 chroot/root/profile/iso-layout
+    as_root install -m 0644 "$PROFILE_DIR/profile.env" chroot/root/profile/profile.env
+    as_root install -m 0644 "$PROFILE_DIR/hooks.sh" chroot/root/profile/hooks.sh
+    as_root install -m 0644 "$PROFILE_DIR/sources.list.template" chroot/root/profile/sources.list.template
+    as_root install -m 0644 "$PROFILE_DIR/live-packages.list" chroot/root/profile/live-packages.list
+    as_root install -m 0644 "$PROFILE_DIR/iso-layout/grub.cfg.template" chroot/root/profile/iso-layout/grub.cfg.template
+    as_root install -m 0644 "$PROFILE_DIR/iso-layout/isolinux.cfg.template" chroot/root/profile/iso-layout/isolinux.cfg.template
+
+    # RAUC profile assets (templates, initramfs hooks, systemd units, helper scripts).
+    # Копируются всегда, чтобы chroot_build.sh/config.sh могли их использовать
+    # при TARGET_FORMAT=rauc. Для TARGET_FORMAT=iso просто остаются unused.
+    if [[ -d "$PROFILE_DIR/rauc" ]]; then
+        as_root cp -a "$PROFILE_DIR/rauc" chroot/root/profile/rauc
+    fi
+
+    # Keyring для RAUC target'а. Копируется только при TARGET_FORMAT=rauc,
+    # чтобы не путать ISO-сборки присутствием секрет-подобного артефакта.
+    if [[ "${TARGET_FORMAT:-iso}" == "rauc" ]]; then
+        local keyring_src="${RAUC_KEYRING_PATH:-}"
+        if [[ -z "$keyring_src" ]]; then
+            if [[ "${RAUC_VERSION_MODE:-release}" == "release" ]]; then
+                >&2 echo "ERROR: RAUC_KEYRING_PATH обязателен для release RAUC-сборки."
+                >&2 echo "       Иначе rootfs получит dev-keyring и не сможет установить prod-подписанные bundle'ы."
+                exit 1
+            fi
+            keyring_src="$SCRIPT_DIR/../pki/dev-keyring.pem"
+        fi
+        if [[ ! -f "$keyring_src" ]]; then
+            >&2 echo "ERROR: RAUC keyring не найден: $keyring_src"
+            if [[ "${RAUC_VERSION_MODE:-release}" != "release" ]]; then
+                >&2 echo "       Для dev-сборок запустите pki/generate-dev-keys.sh."
+            else
+                >&2 echo "       Для release-сборок передайте prod keyring через RAUC_KEYRING_PATH."
+            fi
+            exit 1
+        fi
+        as_root install -D -m 0644 "$keyring_src" chroot/root/rauc-keyring.pem
+    fi
+
+    if [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
+        as_root install -D -m 0644 /etc/ssl/certs/ca-certificates.crt \
+            chroot/usr/local/share/ca-certificates/inauto-host-ca.crt
+        if [[ -x chroot/usr/sbin/update-ca-certificates ]]; then
+            as_root chroot chroot update-ca-certificates
+        fi
+    fi
+
+}
+
+function ensure_chroot_build_helpers() {
+    as_root install -m 0755 "$SCRIPT_DIR/targets/rauc/install-rauc-source.sh" \
+        chroot/root/install-rauc-source.sh
 }
 
 # function run_chroot() {
 
 #     # Launch into chroot environment to build install image.
-#     sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh -
+#     sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} /root/chroot_build.sh -
 
 # }
 
+# Запускает chroot-этап с проброшенным окружением для RAUC target'а.
+# Переменные пробрасываются всегда; для TARGET_FORMAT=iso внутри chroot
+# они просто игнорируются конфигом.
+function invoke_chroot_stage() {
+    local stage="$1"
+    ensure_chroot_build_helpers
+    as_root chroot chroot /usr/bin/env \
+        "DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive}" \
+        "TARGET_DISTRO=${TARGET_DISTRO:-}" \
+        "TARGET_PROFILE=${TARGET_PROFILE:-${TARGET_DISTRO:-}}" \
+        "TARGET_NAME=${TARGET_NAME:-}" \
+        "TARGET_FORMAT=${TARGET_FORMAT:-iso}" \
+        "INAUTO_IMAGE_ROLE=${INAUTO_IMAGE_ROLE:-panel}" \
+        "TARGET_PLATFORM=${TARGET_PLATFORM:-}" \
+        "TARGET_ARCH=${TARGET_ARCH:-}" \
+        "RAUC_BUNDLE_VERSION=${RAUC_BUNDLE_VERSION:-}" \
+        "RAUC_PINNED_VERSION=${RAUC_PINNED_VERSION:-1.15.2}" \
+        "RAUC_COMPATIBLE_VERSION=${RAUC_COMPATIBLE_VERSION:-v1}" \
+        "INAUTO_OVERLAY_SIZE=${INAUTO_OVERLAY_SIZE:-2G}" \
+        "INAUTO_SITE_CONFIG_DIR=${INAUTO_SITE_CONFIG_DIR:-/home/inauto/config}" \
+        "INAUTO_AUTOSTART_SCRIPT=${INAUTO_AUTOSTART_SCRIPT:-/home/inauto/on_login}" \
+        "INAUTO_JOURNAL_DIR=${INAUTO_JOURNAL_DIR:-/home/inauto/log/journal}" \
+        "LIVECD_KEEP_APT_CACHE=${LIVECD_KEEP_APT_CACHE:-1}" \
+        /root/chroot_build.sh "$stage"
+}
+
 function chr_setup_host() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh setup_host
-    
+    invoke_chroot_stage setup_host
 }
 
 function chr_install_pkg() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh install_pkg
-    
+    invoke_chroot_stage install_pkg
 }
 
 function chr_customize_image() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh customize_image
-    
+    invoke_chroot_stage customize_image
 }
 
 function chr_custom_conf() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh custom_conf
-    
+    invoke_chroot_stage custom_conf
 }
 
 function chr_postpkginst() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh postpkginst
-    
+    invoke_chroot_stage postpkginst
 }
 
 function chr_build_image() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh build_image
-    
+    invoke_chroot_stage build_image
 }
 
 function chr_finish_up() {
-    sudo chroot chroot /usr/bin/env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-readline} /root/chroot_build.sh finish_up
-    
+    invoke_chroot_stage finish_up
 }
 
 function postchroot() {
        # Cleanup after image changes
-    sudo rm -f chroot/root/chroot_build.sh
-    sudo rm -f chroot/root/default_config.sh
+    as_root rm -f chroot/root/chroot_build.sh
     if [[ -f "chroot/root/config.sh" ]]; then
-        sudo rm -f chroot/root/config.sh
+        as_root rm -f chroot/root/config.sh
     fi
+    as_root rm -rf chroot/root/profile
+    as_root rm -f chroot/root/rauc-keyring.pem
 
     chroot_exit_teardown
 
 }
 
 function build_iso() {
-    echo "=====> running build_iso ..."
+    echo "=====> preparing rootfs squashfs ..."
+
+    # Replace previous image artifacts to make repeated builds idempotent.
+    as_root rm -rf image
 
     # move image artifacts
-    sudo mv chroot/image .
+    as_root mv chroot/image .
 
     # compress rootfs
-    sudo mksquashfs chroot image/casper/filesystem.squashfs \
+    as_root mksquashfs chroot image/$LIVE_BOOT_DIR/$LIVE_SQUASHFS_NAME \
         -noappend -no-duplicates -no-recovery \
         -wildcards \
         -comp xz -b 1M -Xdict-size 100% \
@@ -194,11 +644,22 @@ function build_iso() {
         -e "swapfile"
 
     # write the filesystem.size
-    printf $(sudo du -sx --block-size=1 chroot | cut -f1) | sudo tee image/casper/filesystem.size
+    printf "%s" "$(as_root du -sx --block-size=1 chroot | cut -f1)" | as_root tee image/$LIVE_BOOT_DIR/filesystem.size
 
-    pushd $SCRIPT_DIR/image
+    if [[ "${TARGET_FORMAT:-iso}" == "rauc" ]]; then
+        echo "=====> TARGET_FORMAT=rauc: squashfs готов, ISO-packaging пропущен (см. build_rauc_bundle)"
+        return 0
+    fi
+    if [[ "${INAUTO_IMAGE_ROLE:-panel}" == "factory-installer" ]]; then
+        echo "=====> INAUTO_IMAGE_ROLE=factory-installer: plain ISO-packaging пропущен (см. build_rauc_installer_iso)"
+        return 0
+    fi
 
-    sudo xorriso \
+    echo "=====> running build_iso (xorriso) ..."
+
+    pushd "$SCRIPT_DIR/image"
+
+    as_root xorriso \
         -as mkisofs \
         -iso-level 3 \
         -full-iso9660-filenames \
@@ -228,7 +689,7 @@ function build_iso() {
          "/EFI/boot/bootx64.efi=isolinux/bootx64.efi" \
          "/EFI/boot/mmx64.efi=isolinux/mmx64.efi" \
          "/EFI/boot/grubx64.efi=isolinux/grubx64.efi" \
-         "/EFI/ubuntu/grub.cfg=isolinux/grub.cfg" \
+         "/EFI/${EFI_GRUB_DIR:-ubuntu}/grub.cfg=isolinux/grub.cfg" \
          "/isolinux/bios.img=isolinux/bios.img" \
          "/isolinux/efiboot.img=isolinux/efiboot.img" \
          "."
@@ -236,37 +697,181 @@ function build_iso() {
     popd
 }
 
+# Собирает RAUC bundle (.raucb) для TARGET_FORMAT=rauc.
+# No-op при TARGET_FORMAT=iso, чтобы CMD-поток '-' работал для обоих target'ов.
+#
+# Требует, чтобы build_iso уже прогнал mksquashfs (squashfs лежит в
+# scripts/image/<LIVE_BOOT_DIR>/<LIVE_SQUASHFS_NAME>) и чтобы kernel/initrd
+# были скопированы chr_build_image'ом.
+function build_rauc_bundle() {
+    if [[ "${TARGET_FORMAT:-iso}" != "rauc" ]]; then
+        return 0
+    fi
+
+    echo "=====> running build_rauc_bundle ..."
+
+    export TARGET_DISTRO TARGET_FORMAT TARGET_PLATFORM TARGET_ARCH \
+        RAUC_BUNDLE_VERSION RAUC_SIGNING_CERT RAUC_SIGNING_KEY \
+        RAUC_INTERMEDIATE_CERT RAUC_VERSION_MODE RAUC_COMPATIBLE_VERSION
+
+    as_root env \
+        "TARGET_DISTRO=${TARGET_DISTRO:-}" \
+        "TARGET_FORMAT=${TARGET_FORMAT:-}" \
+        "TARGET_PLATFORM=${TARGET_PLATFORM:-}" \
+        "TARGET_ARCH=${TARGET_ARCH:-}" \
+        "RAUC_COMPATIBLE_VERSION=${RAUC_COMPATIBLE_VERSION:-v1}" \
+        "RAUC_BUNDLE_VERSION=${RAUC_BUNDLE_VERSION:-}" \
+        "RAUC_SIGNING_CERT=${RAUC_SIGNING_CERT:-}" \
+        "RAUC_SIGNING_KEY=${RAUC_SIGNING_KEY:-}" \
+        "RAUC_INTERMEDIATE_CERT=${RAUC_INTERMEDIATE_CERT:-}" \
+        "RAUC_VERSION_MODE=${RAUC_VERSION_MODE:-release}" \
+        "$SCRIPT_DIR/targets/rauc/build-bundle.sh"
+}
+
+# Собирает installer payload (tar.zst) для TARGET_FORMAT=rauc.
+# No-op при TARGET_FORMAT=iso. Запускается сразу после build_rauc_bundle —
+# это позволяет одной командой `./scripts/build-in-docker.sh -` получить
+# оба артефакта без heredoc'ов через --shell, что недоступно в non-TTY CI.
+function build_installer_image() {
+    if [[ "${TARGET_FORMAT:-iso}" != "rauc" ]]; then
+        return 0
+    fi
+
+    echo "=====> running build_installer_image ..."
+
+    as_root env \
+        "TARGET_DISTRO=${TARGET_DISTRO:-}" \
+        "TARGET_FORMAT=${TARGET_FORMAT:-}" \
+        "TARGET_PLATFORM=${TARGET_PLATFORM:-}" \
+        "TARGET_ARCH=${TARGET_ARCH:-}" \
+        "RAUC_COMPATIBLE_VERSION=${RAUC_COMPATIBLE_VERSION:-v1}" \
+        "RAUC_BUNDLE_VERSION=${RAUC_BUNDLE_VERSION:-}" \
+        "RAUC_VERSION_MODE=${RAUC_VERSION_MODE:-release}" \
+        "INSTALLER_KEYRING_SRC=${INSTALLER_KEYRING_SRC:-}" \
+        "$SCRIPT_DIR/targets/rauc/build-installer-image.sh"
+}
+
+# Собирает bootable USB ISO для factory provisioning RAUC target'а.
+# Запускается только во второй фазе сборки: INAUTO_IMAGE_ROLE=factory-installer.
+# ISO использует отдельную live image/ директорию installer'а и кладёт рядом
+# RAUC installer payload из repo-root out/.
+function build_rauc_installer_iso() {
+    if [[ "${INAUTO_IMAGE_ROLE:-panel}" != "factory-installer" ]]; then
+        return 0
+    fi
+
+    echo "=====> running build_rauc_installer_iso ..."
+
+    local artifact_base
+    local out_dir
+    local payload_tar
+    local installer_iso
+
+    artifact_base="inauto-panel-installer-${TARGET_DISTRO}-${TARGET_ARCH}-${TARGET_PLATFORM}-${RAUC_BUNDLE_VERSION}"
+    out_dir="$(dirname "$SCRIPT_DIR")/out"
+    payload_tar="$out_dir/${artifact_base}.tar.zst"
+    installer_iso="$out_dir/${artifact_base}.iso"
+
+    [[ -f "$payload_tar" ]] || {
+        >&2 echo "ERROR: installer payload not found: $payload_tar"
+        return 1
+    }
+    [[ -d "$SCRIPT_DIR/image" ]] || {
+        >&2 echo "ERROR: live image directory not found: $SCRIPT_DIR/image"
+        return 1
+    }
+
+    as_root rm -rf "$SCRIPT_DIR/image/inauto-installer"
+    as_root tar -I zstd -xf "$payload_tar" -C "$SCRIPT_DIR/image"
+    as_root tee "$SCRIPT_DIR/image/inauto-installer/Inauto Panel Installer.desktop" >/dev/null <<'EOF_INSTALLER_DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Inauto Panel Installer
+Comment=Install Inauto panel firmware
+Exec=/usr/local/sbin/inauto-factory-installer-autostart
+Terminal=false
+Categories=System;
+EOF_INSTALLER_DESKTOP
+    as_root chmod 0755 "$SCRIPT_DIR/image/inauto-installer/Inauto Panel Installer.desktop"
+
+    pushd "$SCRIPT_DIR/image"
+
+    as_root xorriso \
+        -as mkisofs \
+        -iso-level 3 \
+        -full-iso9660-filenames \
+        -J -J -joliet-long \
+        -volid "INAUTO_INSTALLER" \
+        -output "$installer_iso" \
+      -eltorito-boot isolinux/bios.img \
+        -no-emul-boot \
+        -boot-load-size 4 \
+        -boot-info-table \
+        --eltorito-catalog boot.catalog \
+        --grub2-boot-info \
+        --grub2-mbr ../chroot/usr/lib/grub/i386-pc/boot_hybrid.img \
+        -partition_offset 16 \
+        --mbr-force-bootable \
+      -eltorito-alt-boot \
+        -no-emul-boot \
+        -e isolinux/efiboot.img \
+        -append_partition 2 28732ac11ff8d211ba4b00a0c93ec93b isolinux/efiboot.img \
+        -appended_part_as_gpt \
+        -iso_mbr_part_type a2a0d0ebe5b9334487c068b6b72699c7 \
+        -m "isolinux/efiboot.img" \
+        -m "isolinux/bios.img" \
+        -e '--interval:appended_partition_2:::' \
+      -exclude isolinux \
+      -graft-points \
+         "/EFI/boot/bootx64.efi=isolinux/bootx64.efi" \
+         "/EFI/boot/mmx64.efi=isolinux/mmx64.efi" \
+         "/EFI/boot/grubx64.efi=isolinux/grubx64.efi" \
+         "/EFI/${EFI_GRUB_DIR:-ubuntu}/grub.cfg=isolinux/grub.cfg" \
+         "/isolinux/bios.img=isolinux/bios.img" \
+         "/isolinux/efiboot.img=isolinux/efiboot.img" \
+         "."
+
+    popd
+
+    (cd "$out_dir" && sha256sum "${artifact_base}.iso" > "${artifact_base}.iso.sha256")
+    echo "=====> RAUC installer ISO готов: $installer_iso"
+}
+
 # =============   main  ================
 
 # we always stay in $SCRIPT_DIR
-cd $SCRIPT_DIR
+cd "$SCRIPT_DIR"
 
 load_config
 check_config
+load_profile
 check_host
 
 # check number of args
-if [[ $# == 0 || $# > 3 ]]; then help; fi
+if (( $# == 0 || $# > 3 )); then help; fi
 
 # loop through args
 dash_flag=false
 start_index=0
 end_index=${#CMD[*]}
+cmd_index=0
 for ii in "$@";
 do
     if [[ $ii == "-" ]]; then
         dash_flag=true
         continue
     fi
-    find_index $ii
+    if ! cmd_index="$(find_index "$ii")"; then
+        help "Command not found : $ii"
+    fi
     if [[ $dash_flag == false ]]; then
-        start_index=$index
+        start_index=$cmd_index
     else
-        end_index=$(($index+1))
+        end_index=$((cmd_index + 1))
     fi
 done
 if [[ $dash_flag == false ]]; then
-    end_index=$(($start_index + 1))
+    end_index=$((start_index + 1))
 fi
 
 #loop through the commands

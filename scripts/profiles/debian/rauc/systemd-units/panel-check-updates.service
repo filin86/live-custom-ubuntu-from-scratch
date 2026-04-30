@@ -1,0 +1,10 @@
+[Unit]
+Description=Check update server and install new RAUC bundles
+After=network-online.target rauc-mark-boot-good.service
+Wants=network-online.target
+ConditionPathExists=/etc/inauto/update-server
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/panel-check-updates.sh
+# Не блокируем boot-good; агент запускается уже после mark-good.
