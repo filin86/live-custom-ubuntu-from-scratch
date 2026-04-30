@@ -1,0 +1,7 @@
+.git
+.github
+.codex
+scripts/chroot
+scripts/image
+scripts/reports
+scripts/*.iso

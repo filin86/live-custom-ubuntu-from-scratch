@@ -8,37 +8,78 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 
 CMD=(setup_host install_pkg customize_image custom_conf postpkginst build_image finish_up)
 
+# Profile is installed into chroot by build.sh::prechroot.
+PROFILE_DIR="/root/profile"
+if [[ ! -d "$PROFILE_DIR" ]]; then
+    >&2 echo "ERROR: $PROFILE_DIR missing inside chroot; build.sh::prechroot must copy it"
+    exit 1
+fi
+# shellcheck source=/dev/null
+. "$PROFILE_DIR/profile.env"
+# shellcheck source=/dev/null
+. "$PROFILE_DIR/hooks.sh"
+
+# Resolve target version/mirror from profile-indirected variable names.
+TARGET_VERSION="${!VERSION_VAR_NAME}"
+TARGET_MIRROR="${!MIRROR_VAR_NAME}"
+
+# Helper — apt-install from a text-file list (lines, # comments).
+function apt_install_list() {
+    local list_file="$1"
+    local -a pkgs=()
+    local line
+
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        line="${line//[[:space:]]/}"
+        [[ -n "$line" ]] && pkgs+=("$line")
+    done < "$list_file"
+
+    if (( ${#pkgs[@]} == 0 )); then
+        echo "No packages in $list_file"
+        return 0
+    fi
+
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${pkgs[@]}"
+}
+
 function help() {
     # if $1 is set, use $1 as headline message in help()
-    if [ -z ${1+x} ]; then
-        echo -e "This script builds Ubuntu from scratch"
-        echo -e
+    if [[ -z "${1+x}" ]]; then
+        printf '%s\n\n' "This script builds Ubuntu from scratch"
     else
-        echo -e $1
-        echo
+        printf '%s\n\n' "$1"
     fi
-    echo -e "Supported commands : ${CMD[*]}"
-    echo -e
-    echo -e "Syntax: $0 [start_cmd] [-] [end_cmd]"
-    echo -e "\trun from start_cmd to end_end"
-    echo -e "\tif start_cmd is omitted, start from first command"
-    echo -e "\tif end_cmd is omitted, end with last command"
-    echo -e "\tenter single cmd to run the specific command"
-    echo -e "\tenter '-' as only argument to run all commands"
-    echo -e
+    printf '%s\n\n' "Supported commands : ${CMD[*]}"
+    printf '%s\n' "Syntax: $0 [start_cmd] [-] [end_cmd]"
+    printf '\t%s\n' "run from start_cmd to end_end"
+    printf '\t%s\n' "if start_cmd is omitted, start from first command"
+    printf '\t%s\n' "if end_cmd is omitted, end with last command"
+    printf '\t%s\n' "enter single cmd to run the specific command"
+    printf '\t%s\n\n' "enter '-' as only argument to run all commands"
     exit 0
 }
 
 function find_index() {
-    local ret;
     local i;
     for ((i=0; i<${#CMD[*]}; i++)); do
         if [ "${CMD[i]}" == "$1" ]; then
-            index=$i;
-            return;
+            printf '%s\n' "$i"
+            return 0
         fi
     done
-    help "Command not found : $1"
+    return 1
+}
+
+function require_efi_loader() {
+    local loader="$1"
+    local package_hint="$2"
+
+    if [[ ! -s "$loader" ]]; then
+        >&2 printf 'ERROR: required EFI loader not found: %s\n' "$loader"
+        >&2 printf '       Check that profile live-packages.list installs %s.\n' "$package_hint"
+        exit 1
+    fi
 }
 
 function check_host() {
@@ -49,153 +90,66 @@ function check_host() {
 
     export HOME=/root
     export LC_ALL=C
+    export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+    export DEBCONF_NONINTERACTIVE_SEEN=true
 }
 
 function setup_host() {
     echo "=====> running setup_host ..."
 
-   cat <<EOF > /etc/apt/sources.list
-deb $TARGET_UBUNTU_MIRROR $TARGET_UBUNTU_VERSION main restricted universe multiverse
-deb-src $TARGET_UBUNTU_MIRROR $TARGET_UBUNTU_VERSION main restricted universe multiverse
-
-deb $TARGET_UBUNTU_MIRROR $TARGET_UBUNTU_VERSION-security main restricted universe multiverse
-deb-src $TARGET_UBUNTU_MIRROR $TARGET_UBUNTU_VERSION-security main restricted universe multiverse
-
-deb $TARGET_UBUNTU_MIRROR $TARGET_UBUNTU_VERSION-updates main restricted universe multiverse
-deb-src $TARGET_UBUNTU_MIRROR $TARGET_UBUNTU_VERSION-updates main restricted universe multiverse
-EOF
+    TARGET_MIRROR="$TARGET_MIRROR" TARGET_VERSION="$TARGET_VERSION" \
+        envsubst '$TARGET_MIRROR $TARGET_VERSION' \
+        < "$PROFILE_DIR/sources.list.template" \
+        > /etc/apt/sources.list
 
     echo "$TARGET_NAME" > /etc/hostname
 
-    # we need to install systemd first, to configure machine id
     apt-get update
-    apt-get install -y libterm-readline-gnu-perl systemd-sysv
+    apt-get install -y libterm-readline-gnu-perl systemd-sysv dbus-bin
 
-    #configure machine id
     dbus-uuidgen > /etc/machine-id
     ln -fs /etc/machine-id /var/lib/dbus/machine-id
 
-    # don't understand why, but multiple sources indicate this
-    dpkg-divert --local --rename --add /sbin/initctl
+    if ! dpkg-divert --list /sbin/initctl | grep -q 'local diversion'; then
+        dpkg-divert --local --rename --add /sbin/initctl
+    fi
+    rm -f /sbin/initctl
     ln -s /bin/true /sbin/initctl
 }
 
 # Load configuration values from file
 function load_config() {
-    if [[ -f "$SCRIPT_DIR/config.sh" ]]; then 
-        . "$SCRIPT_DIR/config.sh"
-    elif [[ -f "$SCRIPT_DIR/default_config.sh" ]]; then
-        . "$SCRIPT_DIR/default_config.sh"
-    else
-        >&2 echo "Unable to find default config file  $SCRIPT_DIR/default_config.sh, aborting."
+    if [[ ! -f "$SCRIPT_DIR/config.sh" ]]; then
+        >&2 echo "ERROR: $SCRIPT_DIR/config.sh не найден — build.sh должен был его скопировать в chroot."
         exit 1
     fi
+    # shellcheck source=/dev/null
+    . "$SCRIPT_DIR/config.sh"
 }
 
 
 function install_pkg() {
     echo "=====> running install_pkg ... will take a long time ..."
-    apt-get -y upgrade
 
-    # install live packages
-    apt-get install -y \
-        sudo \
-        casper \
-        network-manager \
-        locales \
-        grub-common \
-        grub-gfxpayload-lists \
-        grub-pc \
-        grub-pc-bin \
-        grub2-common \
-        grub-efi-amd64-signed \
-        shim-signed \
-        mtools \
-        openssh-server \
-        unzip \
-        binutils
-    
-    case $TARGET_UBUNTU_VERSION in
-        "focal" | "bionic")
-            apt-get install -y lupin-casper
-            ;;
-        *)
-            echo "Package lupin-casper is not needed. Skipping."
-            ;;
-    esac
-    
-    # install kernel
-    # Mirrors can be partially synchronized. Retry with several strategies and
-    # avoid hard failure on a single meta-package transaction.
-    local kernel_pkg
-    local concrete_generic
-    local concrete_virtual
-    kernel_pkg="${TARGET_KERNEL_PACKAGE:-linux-image-generic}"
-
-    try_install_kernel_pkg() {
-        local pkg="$1"
-        apt-get install -y --no-install-recommends "$pkg" && return 0
-        apt-get install -y --no-install-recommends -t "$TARGET_UBUNTU_VERSION" "$pkg" && return 0
-        return 1
-    }
-
-    apt-get update
-
-    if ! try_install_kernel_pkg "$kernel_pkg"; then
-        echo "WARNING: failed to install kernel package: $kernel_pkg"
-
-        if [[ "$kernel_pkg" != "linux-image-generic" ]]; then
-            echo "WARNING: retrying with linux-image-generic"
-            try_install_kernel_pkg linux-image-generic || true
-        fi
-
-        if ! dpkg -s linux-image-generic >/dev/null 2>&1 && [[ "$TARGET_UBUNTU_MIRROR" != "http://archive.ubuntu.com/ubuntu/" ]]; then
-            echo "WARNING: retrying kernel install from fallback mirror: archive.ubuntu.com"
-            cat <<EOF > /etc/apt/sources.list
-
-deb http://archive.ubuntu.com/ubuntu/ $TARGET_UBUNTU_VERSION main restricted universe multiverse
-deb http://archive.ubuntu.com/ubuntu/ $TARGET_UBUNTU_VERSION-security main restricted universe multiverse
-deb http://archive.ubuntu.com/ubuntu/ $TARGET_UBUNTU_VERSION-updates main restricted universe multiverse
-EOF
-            apt-get update
-            try_install_kernel_pkg linux-image-generic || true
-        fi
-
-        if ! dpkg -s linux-image-generic >/dev/null 2>&1; then
-            concrete_generic=$(apt-cache search '^linux-image-[0-9].*-generic$' | awk '{print $1}' | sort -Vr | head -n1 || true)
-            if [[ -n "$concrete_generic" ]]; then
-                echo "WARNING: retrying with concrete package: $concrete_generic"
-                try_install_kernel_pkg "$concrete_generic" || true
-            fi
-        fi
-
-        if ! ls /boot/vmlinuz-* >/dev/null 2>&1; then
-            concrete_virtual=$(apt-cache search '^linux-image-[0-9].*-virtual$' | awk '{print $1}' | sort -Vr | head -n1 || true)
-            if [[ -n "$concrete_virtual" ]]; then
-                echo "WARNING: retrying with concrete virtual package: $concrete_virtual"
-                try_install_kernel_pkg "$concrete_virtual" || true
-            else
-                echo "WARNING: retrying with linux-image-virtual"
-                try_install_kernel_pkg linux-image-virtual || true
-            fi
-        fi
-
-        if ! ls /boot/vmlinuz-* >/dev/null 2>&1; then
-            >&2 echo "ERROR: unable to install a bootable kernel package"
-            exit 1
-        fi
+    if declare -F preseed_debconf >/dev/null 2>&1; then
+        preseed_debconf
     fi
 
-    # graphic installer - ubiquity
+    apt-get -y upgrade
+
+    # Install live-stack and GRUB packages from profile.
+    profile_install_live_stack
+
+    # Install kernel via profile-specific hook.
+    profile_kernel_install
+
+    # graphic installer - ubiquity (intentionally disabled in this fork)
     #apt-get install -y \
     #    ubiquity \
     #    ubiquity-casper \
     #    ubiquity-frontend-gtk \
     #    ubiquity-slideshow-ubuntu \
     #    ubiquity-ubuntu-artwork
-
-    # Call into config function
-    
 }
 
 function postpkginst() {
@@ -203,9 +157,13 @@ function postpkginst() {
     apt-get autoremove -y
 
     # final touch
-    dpkg-reconfigure locales
+    dpkg-reconfigure -f noninteractive locales keyboard-configuration console-setup
 
-    apt-get clean -y
+    if [[ "${LIVECD_KEEP_APT_CACHE:-0}" == "1" ]]; then
+        echo "Keeping apt package cache for faster rebuilds (LIVECD_KEEP_APT_CACHE=1)"
+    else
+        apt-get clean -y
+    fi
 }
 
 function build_image() {
@@ -213,7 +171,7 @@ function build_image() {
 
     rm -rf /image
 
-    mkdir -p /image/{casper,isolinux,install}
+    mkdir -p /image/{$LIVE_BOOT_DIR,isolinux,install}
 
     pushd /image
 
@@ -244,59 +202,29 @@ function build_image() {
         exit 1
     fi
 
-    cp "$kernel_src" casper/vmlinuz
-    cp "$initrd_src" casper/initrd
+    cp "$kernel_src" "$LIVE_BOOT_DIR/$LIVE_KERNEL_NAME"
+    cp "$initrd_src" "$LIVE_BOOT_DIR/$LIVE_INITRD_NAME"
 
-    # memtest86
-    wget --progress=dot https://memtest.org/download/v7.20/mt86plus_7.20.binaries.zip -O install/memtest86.zip
-    unzip -p install/memtest86.zip memtest64.bin > install/memtest86+.bin
-    unzip -p install/memtest86.zip memtest64.efi > install/memtest86+.efi
-    rm -f install/memtest86.zip
+    # memtest86+ comes from the distro package instead of an unverified network archive.
+    if [[ ! -s /boot/memtest86+x64.bin || ! -s /boot/memtest86+x64.efi ]]; then
+        >&2 echo "ERROR: memtest86+ package files not found in /boot"
+        >&2 echo "Install the memtest86+ package in the live profile before building the ISO"
+        exit 1
+    fi
+    install -m 0644 /boot/memtest86+x64.bin install/memtest86+.bin
+    install -m 0644 /boot/memtest86+x64.efi install/memtest86+.efi
 
     # grub
-    touch ubuntu
-    cat <<EOF > isolinux/grub.cfg
-
-search --set=root --file /ubuntu
-
-insmod all_video
-
-set default="0"
-set timeout=1
-
-menuentry "Inautomatic Ubuntu" {
-    linux /casper/vmlinuz boot=casper systemd.mask=udisks2 nopersistent toram noprompt ---
-    initrd /casper/initrd
-}
-
-menuentry "Check disc for defects" {
-    linux /casper/vmlinuz boot=casper integrity-check quiet splash ---
-    initrd /casper/initrd
-}
-
-grub_platform
-if [ "\$grub_platform" = "efi" ]; then
-menuentry 'UEFI Firmware Settings' {
-    fwsetup
-}
-
-menuentry "Test memory Memtest86+ (UEFI)" {
-    linux /install/memtest86+.efi
-}
-else
-menuentry "Test memory Memtest86+ (BIOS)" {
-    linux16 /install/memtest86+.bin
-}
-fi
-EOF
+    profile_write_image_marker
+    profile_write_boot_configs
 
     # generate manifest
-    dpkg-query -W --showformat='${Package} ${Version}\n' | sudo tee casper/filesystem.manifest
+    dpkg-query -W --showformat='${Package} ${Version}\n' | tee $LIVE_BOOT_DIR/filesystem.manifest
 
-    cp -v casper/filesystem.manifest casper/filesystem.manifest-desktop
+    cp -v $LIVE_BOOT_DIR/filesystem.manifest $LIVE_BOOT_DIR/filesystem.manifest-desktop
 
     for pkg in $TARGET_PACKAGE_REMOVE; do
-        sudo sed -i "/$pkg/d" casper/filesystem.manifest-desktop
+        sed -i "/$pkg/d" $LIVE_BOOT_DIR/filesystem.manifest-desktop
     done
 
     # create diskdefines
@@ -313,20 +241,34 @@ EOF
 EOF
 
     # copy EFI loaders
-    cp /usr/lib/shim/shimx64.efi.signed.previous isolinux/bootx64.efi
-    cp /usr/lib/shim/mmx64.efi isolinux/mmx64.efi
-    cp /usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed isolinux/grubx64.efi
+    local efi_grub_dir="${EFI_GRUB_DIR:-ubuntu}"
+    local shim_loader="/usr/lib/shim/shimx64.efi.signed"
+    local mok_manager="/usr/lib/shim/mmx64.efi"
+    local grub_loader="/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed"
+
+    if [[ ! "$efi_grub_dir" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        >&2 echo "ERROR: EFI_GRUB_DIR contains unsupported characters: $efi_grub_dir"
+        exit 1
+    fi
+
+    require_efi_loader "$shim_loader" "shim-signed"
+    require_efi_loader "$mok_manager" "shim-signed"
+    require_efi_loader "$grub_loader" "grub-efi-amd64-signed"
+
+    cp "$shim_loader" isolinux/bootx64.efi
+    cp "$mok_manager" isolinux/mmx64.efi
+    cp "$grub_loader" isolinux/grubx64.efi
 
     # create a FAT16 UEFI boot disk image containing the EFI bootloaders
     (
         cd isolinux && \
         dd if=/dev/zero of=efiboot.img bs=1M count=10 && \
         mkfs.vfat -F 16 efiboot.img && \
-        LC_CTYPE=C mmd -i efiboot.img efi efi/ubuntu efi/boot && \
+        LC_CTYPE=C mmd -i efiboot.img efi "efi/$efi_grub_dir" efi/boot && \
         LC_CTYPE=C mcopy -i efiboot.img ./bootx64.efi ::efi/boot/bootx64.efi && \
         LC_CTYPE=C mcopy -i efiboot.img ./mmx64.efi ::efi/boot/mmx64.efi && \
         LC_CTYPE=C mcopy -i efiboot.img ./grubx64.efi ::efi/boot/grubx64.efi && \
-        LC_CTYPE=C mcopy -i efiboot.img ./grub.cfg ::efi/ubuntu/grub.cfg
+        LC_CTYPE=C mcopy -i efiboot.img ./grub.cfg "::efi/$efi_grub_dir/grub.cfg"
     )
 
     # create a grub BIOS image
@@ -355,8 +297,10 @@ function finish_up() {
     truncate -s 0 /etc/machine-id
 
     # remove diversion (why??)
-    rm /sbin/initctl
-    dpkg-divert --rename --remove /sbin/initctl
+    rm -f /sbin/initctl
+    if dpkg-divert --list /sbin/initctl | grep -q 'local diversion'; then
+        dpkg-divert --rename --remove /sbin/initctl
+    fi
 
     rm -rf /tmp/* ~/.bash_history
 }
@@ -367,27 +311,30 @@ load_config
 check_host
 
 # check number of args
-if [[ $# == 0 || $# > 3 ]]; then help; fi
+if (( $# == 0 || $# > 3 )); then help; fi
 
 # loop through args
 dash_flag=false
 start_index=0
 end_index=${#CMD[*]}
+cmd_index=0
 for ii in "$@";
 do
     if [[ $ii == "-" ]]; then
         dash_flag=true
         continue
     fi
-    find_index $ii
+    if ! cmd_index="$(find_index "$ii")"; then
+        help "Command not found : $ii"
+    fi
     if [[ $dash_flag == false ]]; then
-        start_index=$index
+        start_index=$cmd_index
     else
-        end_index=$(($index+1))
+        end_index=$((cmd_index + 1))
     fi
 done
 if [[ $dash_flag == false ]]; then
-    end_index=$(($start_index + 1))
+    end_index=$((start_index + 1))
 fi
 
 # loop through the commands

@@ -1,0 +1,28 @@
+services:
+  api:
+    build: .
+    image: inauto-update-server:local
+    restart: unless-stopped
+    environment:
+      INAUTO_UPLOAD_TOKEN: "${INAUTO_UPLOAD_TOKEN:?set INAUTO_UPLOAD_TOKEN в .env}"
+      INAUTO_PUBLIC_BASE_URL: "${INAUTO_PUBLIC_BASE_URL:?set INAUTO_PUBLIC_BASE_URL в .env (абсолютный URL для /bundles/*)}"
+      INAUTO_RAUC_KEYRING: "/keyring/keyring.pem"
+    volumes:
+      - update-data:/var/lib/inauto-update
+      - ./keyring:/keyring:ro
+    expose:
+      - "9000"
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${INAUTO_LISTEN_PORT:-9001}:9000"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - update-data:/var/lib/inauto-update:ro
+
+volumes:
+  update-data:
