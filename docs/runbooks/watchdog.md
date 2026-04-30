@@ -1,4 +1,4 @@
-# Runbook: watchdog и BootNext rollback
+# Инструкция: watchdog и откат BootNext
 
 Дата: 2026-04-20
 Применимость: `TARGET_FORMAT=rauc`, `TARGET_PLATFORM=pc-efi`.
@@ -159,7 +159,7 @@ override нельзя — kernel cmdline читается UEFI при загру
 
 ## Ссылки
 
-- Spec: `docs/superpowers/specs/2026-04-20-immutable-panel-firmware-design.md` раздел "Boot watchdog".
+- Design: `docs/2026-04-20-immutable-panel-firmware-design.md` раздел "Boot watchdog".
 - QEMU тест: `docs/runbooks/qemu-pc-efi-test.md` шаг 5.5.
 - Healthcheck и mark-good: `scripts/profiles/<distro>/rauc/scripts/panel-healthcheck.sh`,
   `scripts/profiles/<distro>/rauc/systemd-units/rauc-mark-boot-good.service`.

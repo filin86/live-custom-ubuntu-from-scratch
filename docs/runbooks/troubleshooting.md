@@ -1,4 +1,4 @@
-# Runbook: troubleshooting immutable panel firmware
+# Инструкция: диагностика RAUC-панели
 
 Дата: 2026-04-20
 Применимость: `TARGET_FORMAT=rauc`, `TARGET_PLATFORM=pc-efi`.
@@ -25,8 +25,8 @@
 efibootmgr -v
 # Ожидаем:
 #   BootOrder: XXXX,YYYY,...
-#   BootXXXX* system0  HD(1,GPT,...,)/File(\EFI\Linux\inauto-panel.efi)
-#   BootYYYY* system1  HD(2,GPT,...,)/File(\EFI\Linux\inauto-panel.efi)
+#   BootXXXX* system0  HD(1,GPT,...,)/File(\EFI\BOOT\BOOTX64.EFI) ... rauc.slot=system0 root=PARTUUID=...
+#   BootYYYY* system1  HD(2,GPT,...,)/File(\EFI\BOOT\BOOTX64.EFI) ... rauc.slot=system1 root=PARTUUID=...
 ```
 
 Если entries отсутствуют — installer не отработал шаг `efibootmgr --create`.
@@ -39,14 +39,20 @@ efibootmgr -v
    ```
 2. Пересоздать system0/system1 вручную:
    ```
-   efibootmgr --create --disk /dev/<диск> --part <efi_A_part_num> \
-       --label system0 --loader '\EFI\Linux\inauto-panel.efi'
+   ROOTFS_A_PARTUUID="$(blkid -s PARTUUID -o value /dev/disk/by-partlabel/rootfs_A)"
+   EFI_A_PART="$(lsblk -dn -o PARTN /dev/disk/by-partlabel/efi_A | tr -d '[:space:]')"
+
+   efibootmgr --create --disk /dev/<диск> --part "$EFI_A_PART" \
+       --label system0 \
+       --loader '\EFI\BOOT\BOOTX64.EFI' \
+       --unicode "initrd=\\EFI\\Linux\\initrd.img rauc.slot=system0 root=PARTUUID=${ROOTFS_A_PARTUUID} rootfstype=squashfs ro quiet panic=30"
    ```
-   Партиционный номер находится через `lsblk | grep efi_A` и `readlink`.
-3. Проверить что `\EFI\Linux\inauto-panel.efi` физически есть в `efi_A`:
+   Партиционный номер находится через `lsblk -dn -o PARTN /dev/disk/by-partlabel/efi_A`.
+3. Проверить что `\EFI\BOOT\BOOTX64.EFI` физически есть в `efi_A`:
    ```
    mount /dev/disk/by-partlabel/efi_A /mnt
-   ls /mnt/EFI/Linux/    # ожидаем inauto-panel.efi + initrd.img
+   ls /mnt/EFI/BOOT/     # ожидаем BOOTX64.EFI
+   ls /mnt/EFI/Linux/    # ожидаем compatibility copy inauto-panel.efi + initrd.img
    ```
 4. Установить BootOrder: `efibootmgr --bootorder <XXXX>,<YYYY>`.
 
@@ -78,7 +84,7 @@ dmesg на ошибки overlay/squashfs.
 ### Что делать
 
 - Если raw-slot пустой (сбой dd в installer'е) — перезапустить installer
-  с того же USB payload.
+  с того же installer ISO или payload.
 - Если partlabels не совпадают — переразметить (`pc-efi.sgdisk`) и заново
   прошить.
 - Если мы попали в emergency shell и можно продолжить:
@@ -152,8 +158,8 @@ systemctl status rauc-mark-boot-good.service
 ## 5. Heartbeat не уходит на update-server
 
 ### Симптомы
-- `panel-check-updates.service` active, но `panels.last_seen` на сервере
-  не обновляется.
+- `panel-check-updates.service` запускается вручную или timer'ом, но
+  `panels.last_seen` на сервере не обновляется.
 
 ### Диагностика
 
@@ -164,9 +170,8 @@ journalctl -u panel-check-updates.service -b --no-pager | tail -50
 Частые проблемы:
 - `update-server отсутствует` → `/etc/inauto/update-server` пустой.
 - `curl: (6) Could not resolve host` → DNS/сеть проблемы.
-- `HTTP 401` → `UPDATE_SERVER_DEPLOY_TOKEN` не совпадает? (панель не
-  аутентифицируется, но heartbeat не требует token'а — это проблема
-  конфигурации сервера).
+- `HTTP 401` → reverse proxy или сервер ошибочно требуют auth для
+  `/api/latest`/`/api/heartbeat`. Панель не отправляет upload-token.
 - `HTTP 400 "slot обязателен"` → на панели cmdline пропал `rauc.slot=`
   (не должно быть — это означает неправильный bundle).
 

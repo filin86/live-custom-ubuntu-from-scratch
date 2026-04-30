@@ -1,24 +1,25 @@
-# Runbook: factory provisioning новой панели
+# Инструкция: заводская подготовка новой панели
 
 Дата: 2026-04-21
-Применимость: первичная прошивка operator-панели (UEFI PC) immutable firmware'ом.
+Применимость: первичная установка панели оператора (UEFI PC) неизменяемой
+RAUC-системой.
 
 ## Требования
 
 - Новая или прошедшая полную очистку панель с UEFI; legacy BIOS не поддерживается.
 - Внутренний накопитель >= 32 GiB: SATA/NVMe/eMMC.
-- Preferred: bootable installer ISO
+- Основной вариант: загрузочный ISO-образ установщика
   `out/inauto-panel-installer-<distro>-<arch>-pc-efi-<version>.iso`.
-- Fallback: installer payload
+- Запасной вариант: архив установщика
   `out/inauto-panel-installer-<distro>-<arch>-pc-efi-<version>.tar.zst`
-  + Ubuntu/Debian Live USB.
-- Клавиатура + монитор для первичной настройки UEFI boot.
+  + загрузочная флешка Ubuntu/Debian.
+- Клавиатура и монитор для первичной настройки загрузки UEFI.
 
 ## Подготовка USB
 
 До прихода на объект:
 
-1. Собрать RAUC target и отдельный factory-installer ISO:
+1. Собрать RAUC-образ и отдельный ISO-образ заводского установщика:
    ```bash
    RAUC_BUNDLE_VERSION=<version> ./scripts/build-rauc-installer.sh
    ```
@@ -26,20 +27,23 @@
    ```bash
    RAUC_BUNDLE_VERSION=<version> ./scripts/build-rauc-installer.sh --clean-cache
    ```
-2. Проверить checksum:
+2. Проверить контрольную сумму:
    ```bash
    cd out
    sha256sum -c inauto-panel-installer-*.iso.sha256
    ```
-3. Записать installer ISO на USB: Rufus/balenaEtcher, GPT, UEFI mode.
+3. Записать ISO-образ установщика на USB: Rufus/balenaEtcher, GPT, режим UEFI.
 
 ## Установка
 
-### 1. Boot
+Для оператора без инженерных деталей используйте
+`docs/runbooks/operator-iso-installer.md`.
+
+### 1. Загрузка
 
 1. Воткнуть USB, включить панель.
-2. В UEFI boot menu выбрать USB entry с пометкой `UEFI`.
-3. Дождаться загрузки live-системы.
+2. В меню загрузки UEFI выбрать USB-запись с пометкой `UEFI`.
+3. Дождаться загрузки временной системы.
 
 ### 2. Мастер
 
@@ -58,34 +62,35 @@
 
 Мастер:
 
-- проверяет UEFI mode;
+- проверяет режим UEFI;
 - показывает список внутренних дисков `>= 32 GiB`;
-- спрашивает hostname панели;
-- даёт выбор update-channel (`stable` или `candidate`) и спрашивает адрес update-server;
-- в начале спрашивает, нужен ли backup старого `/home/inauto`;
-- если backup нужен, предлагает место для архива;
-- пишет hostname в `/home/inauto/staff/hostname`;
-- генерирует serial автоматически как `<hostname>-<uuid>`;
+- спрашивает имя панели;
+- даёт выбор канала обновлений (`stable` или `candidate`) и спрашивает адрес
+  сервера обновлений;
+- в начале спрашивает, нужна ли резервная копия старого `/home/inauto`;
+- если резервная копия нужна, предлагает место для архива;
+- пишет имя панели в `/home/inauto/staff/hostname`;
+- генерирует серийный номер автоматически как `<hostname>-<uuid>`;
 - просит ввести `ERASE` перед стиранием диска;
 - показывает прогресс установки;
-- предлагает reboot после успешной установки.
+- предлагает перезагрузку после успешной установки.
 
-### 3. Первый Boot
+### 3. Первая загрузка
 
-После reboot вытащить installer USB.
+После перезагрузки вытащить USB с установщиком.
 
 Панель должна сама загрузиться с внутреннего диска. UEFI BootOrder должен быть
-`system0, system1`. Если панель снова приходит в installer USB, USB не вытащен
-или firmware вмешался со своим boot entry.
+`system0, system1`. Если панель снова приходит в установщик, USB не вытащен
+или прошивка UEFI вмешалась со своей загрузочной записью.
 
-Ожидаемо при первом boot:
+Ожидаемо при первой загрузке:
 
-- LightDM с auto-login user `ubuntu`;
+- LightDM с автоматическим входом пользователя `ubuntu`;
 - `/home/inauto` смонтирован из `inauto-data`;
 - `/etc/inauto/firmware-version` соответствует установленной версии;
 - SSH и x11vnc доступны.
 
-### 4. Update Server
+### 4. Сервер обновлений
 
 ```bash
 ssh ubuntu@<ip_панели>
@@ -95,25 +100,27 @@ cat /home/inauto/staff/hostname
 cat /etc/inauto/{update-server,channel,serial.txt}
 
 systemctl restart panel-check-updates.timer
+systemctl start panel-check-updates.service
 systemctl list-timers panel-check-updates.timer
 ```
 
 Ожидаемо:
 
-- `/home/inauto/staff/hostname` = введённый в мастере hostname;
-- `/etc/inauto/channel` = выбранный channel;
+- `/home/inauto/staff/hostname` = введённое в мастере имя панели;
+- `/etc/inauto/channel` = выбранный канал обновлений;
 - `/etc/inauto/update-server` = введённый URL сервера;
 - `/etc/inauto/serial.txt` = `<hostname>-<uuid>`.
 
-Через 5-10 минут в `panels` таблице на update-server'е должен появиться
-heartbeat от нового serial.
+Через 5-10 минут в таблице `panels` на сервере обновлений должна появиться
+отметка о связи от нового серийного номера.
 
-## Fallback: Live USB + Payload
+## Запасной вариант: загрузочная флешка + архив установщика
 
-Использовать только если bootable installer ISO недоступен.
+Использовать только если загрузочный ISO-образ установщика недоступен.
+Подробная инструкция: `docs/runbooks/install-from-installer-tar-zst.md`.
 
-1. Загрузить панель с Ubuntu/Debian Live USB в UEFI mode.
-2. Скопировать `inauto-panel-installer-*.tar.zst` на live-систему.
+1. Загрузить панель с флешки Ubuntu/Debian в режиме UEFI.
+2. Скопировать `inauto-panel-installer-*.tar.zst` во временную систему.
 3. Распаковать:
    ```bash
    sudo mkdir -p /opt
@@ -124,20 +131,21 @@ heartbeat от нового serial.
    /opt/inauto-installer/START-INSTALLER.sh
    ```
 
-Если live-система не содержит нужных пакетов (`rauc`, `gdisk`, `jq`, `zstd`,
+Если временная система не содержит нужных пакетов (`rauc`, `gdisk`, `jq`, `zstd`,
 `efibootmgr` и т.п.), мастер предложит установить их через `apt`.
 
-## Acceptance Checklist
+## Проверочный список
 
 - [ ] `efibootmgr -v` показывает `system0` и `system1`, BootOrder = `system0,system1`.
-- [ ] `rauc status` показывает booted slot = `system0`, slot state = `good`.
+- [ ] `rauc status` показывает загруженный слот = `system0`, состояние слота = `good`.
 - [ ] `/home/inauto/.inautolock` существует; skeleton директорий создан.
 - [ ] `/etc/inauto/firmware-version` = ожидаемая `<VERSION>`.
-- [ ] `/home/inauto/staff/hostname` = ожидаемый hostname панели.
+- [ ] `/home/inauto/staff/hostname` = ожидаемое имя панели.
 - [ ] `/etc/inauto/serial.txt` имеет вид `<hostname>-<uuid>`.
 - [ ] `docker info` работает.
 - [ ] `systemctl is-active lightdm docker containerd x11vnc ssh` все `active`.
-- [ ] Heartbeat появился в `panels.last_seen` на update-server'е.
-- [ ] Overlay reset подтверждён: создать `/etc/marker`, reboot, убедиться что он исчез.
+- [ ] Отметка о связи появилась в `panels.last_seen` на сервере обновлений.
+- [ ] Сброс overlay подтверждён: создать `/etc/marker`, перезагрузиться,
+      убедиться что он исчез.
 
 Если все пункты зелёные, панель сдана в эксплуатацию.

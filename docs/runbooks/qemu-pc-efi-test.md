@@ -1,4 +1,4 @@
-# Runbook: QEMU PC EFI gate
+# Инструкция: проверка PC EFI в QEMU
 
 Дата: 2026-04-20
 Применимость: `TARGET_FORMAT=rauc`, `TARGET_PLATFORM=pc-efi`.
@@ -13,20 +13,22 @@
 - OVMF (UEFI firmware for QEMU). Ubuntu: `sudo apt install ovmf`.
   Файлы: `/usr/share/OVMF/OVMF_CODE.fd`, `/usr/share/OVMF/OVMF_VARS.fd`.
 - Сборочное окружение: `./scripts/build-in-docker.sh --rebuild-builder --shell` один раз,
-  чтобы удостовериться, что builder содержит `rauc >= 1.10` (оптимально 1.13+),
+  чтобы удостовериться, что builder содержит pinned RAUC (`RAUC_PINNED_VERSION`,
+  по умолчанию 1.15.2),
   `mtools`, `dosfstools`, `gdisk`, `efibootmgr`.
 
 Payload:
 - `out/inauto-panel-ubuntu-amd64-pc-efi-<version>.raucb`
 - `out/inauto-panel-installer-ubuntu-amd64-pc-efi-<version>.tar.zst`
+- `out/inauto-panel-installer-ubuntu-amd64-pc-efi-<version>.iso`
 
 Соберите их:
 
 ```bash
-TARGET_FORMAT=rauc TARGET_PLATFORM=pc-efi TARGET_ARCH=amd64 \
+TARGET_PLATFORM=pc-efi TARGET_ARCH=amd64 \
     RAUC_BUNDLE_VERSION="dev.$(date -u +%Y.%m.%d).1" \
     RAUC_VERSION_MODE=dev-ok \
-    ./scripts/build-in-docker.sh -
+    ./scripts/build-rauc-installer.sh
 ```
 
 (Переменную `RAUC_VERSION_MODE=dev-ok` используем только в локальной сборке;
@@ -40,20 +42,26 @@ qemu-img create -f qcow2 /tmp/panel.qcow2 64G
 
 32 GiB достаточно для full layout, но 64 оставляет запас для stress-сценариев.
 
-## Шаг 2. Запустить Ubuntu Live USB + установить payload
-
-Для MVP installer payload — это `tar.zst` (см. `docs/runbooks/factory-provisioning.md`,
-секция "До появления bootable USB-ISO").
+## Шаг 2. Запустить installer ISO
 
 Короткая версия:
-1. Запустить любой Ubuntu 24.04 Live ISO в QEMU с OVMF и нашим qcow2 как вторым диском.
-2. В live-сессии стать root, скопировать tar.zst, распаковать в `/opt/inauto-installer/`.
-3. Запустить `/opt/inauto-installer/install-to-disk.sh`:
-   - `TARGET_DEVICE=/dev/vdb` (или что увидит lsblk — наш qcow2 обычно second drive).
-   - `SKIP_REBOOT=1` при CI чтобы контролировать reboot самим.
-   - `FORCE_YES=1` в CI/unattended-сценариях, чтобы пропустить интерактивное подтверждение стирания тестового диска.
+1. Запустить `out/inauto-panel-installer-*.iso` в QEMU с OVMF и пустым qcow2.
+2. В live-сессии запустить desktop-мастер `Inauto Panel Installer` или
+   `/cdrom/inauto-installer/START-INSTALLER.sh`.
+3. Для CI/unattended-сценариев можно запустить runtime script напрямую:
+   - `TARGET_DEVICE=/dev/vda` (или что увидит `lsblk`);
+   - `SKIP_REBOOT=1`, чтобы контролировать reboot самим;
+   - `FORCE_YES=1`, чтобы пропустить подтверждение стирания тестового диска;
+   - `PANEL_HOSTNAME`, `UPDATE_CHANNEL`, `UPDATE_SERVER`, чтобы не было prompt'ов.
 
-Пример QEMU команды для live-сессии:
+   ```bash
+   sudo TARGET_DEVICE=/dev/vda SKIP_REBOOT=1 FORCE_YES=1 \
+       PANEL_HOSTNAME=qemu-panel UPDATE_CHANNEL=candidate \
+       UPDATE_SERVER=http://10.0.2.2:9001 \
+       /cdrom/inauto-installer/install-to-disk.sh
+   ```
+
+Пример QEMU команды для installer-сессии:
 
 ```bash
 qemu-system-x86_64 \
@@ -62,9 +70,8 @@ qemu-system-x86_64 \
     -cpu host \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
     -drive if=pflash,format=raw,file=/tmp/panel-OVMF_VARS.fd \
-    -drive file=/path/to/ubuntu-24.04-live.iso,media=cdrom \
+    -drive file=out/inauto-panel-installer-ubuntu-amd64-pc-efi-<version>.iso,media=cdrom \
     -drive file=/tmp/panel.qcow2,if=virtio,format=qcow2 \
-    -drive file=/tmp/installer-payload.img,if=virtio,format=raw,media=disk \
     -net nic -net user \
     -vga virtio -display gtk
 ```
@@ -78,7 +85,7 @@ qemu-system-x86_64 \
 ### Partlabels + layout
 
 ```bash
-sgdisk -p /dev/vdb
+sgdisk -p /dev/vda
 # Ожидаем именно:
 #  efi_A (512 MiB, EF00)
 #  efi_B (512 MiB, EF00)
@@ -97,8 +104,8 @@ ls -l /dev/disk/by-partlabel/
 ```bash
 efibootmgr -v
 # Ожидаем два entry:
-#   Boot00XX* system0  ... \EFI\Linux\inauto-panel.efi (PARTLABEL=efi_A)
-#   Boot00XX* system1  ... \EFI\Linux\inauto-panel.efi (PARTLABEL=efi_B)
+#   Boot00XX* system0  ... \EFI\BOOT\BOOTX64.EFI ... rauc.slot=system0 root=PARTUUID=...
+#   Boot00XX* system1  ... \EFI\BOOT\BOOTX64.EFI ... rauc.slot=system1 root=PARTUUID=...
 # BootOrder должен начинаться с system0.
 ```
 
@@ -106,8 +113,10 @@ efibootmgr -v
 
 ```bash
 mkdir -p /mnt/efi_A && mount /dev/disk/by-partlabel/efi_A /mnt/efi_A
+ls -l /mnt/efi_A/EFI/BOOT/
+# BOOTX64.EFI
 ls -l /mnt/efi_A/EFI/Linux/
-# inauto-panel.efi, initrd.img
+# compatibility copy inauto-panel.efi + initrd.img
 umount /mnt/efi_A
 ```
 
@@ -141,7 +150,7 @@ qemu-system-x86_64 \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
     -drive if=pflash,format=raw,file=/tmp/panel-OVMF_VARS.fd \
     -drive file=/tmp/panel.qcow2,if=virtio,format=qcow2 \
-    -net nic -net user -net user,hostfwd=tcp::2222-:22 \
+    -net nic -net user,hostfwd=tcp::2222-:22 \
     -vga virtio -display gtk
 ```
 
@@ -188,14 +197,14 @@ systemctl reboot
 
 ```bash
 # До reboot
-cat /etc/machine-id > /tmp/mid.before
-ssh-keyscan -t rsa localhost > /tmp/hostkey.before
+cat /etc/machine-id > /home/inauto/log/mid.before
+ssh-keyscan -t rsa localhost > /home/inauto/log/hostkey.before
 
 systemctl reboot
 
 # После reboot
-diff /tmp/mid.before /etc/machine-id          # equal
-diff /tmp/hostkey.before <(ssh-keyscan -t rsa localhost)  # equal
+diff /home/inauto/log/mid.before /etc/machine-id          # equal
+diff /home/inauto/log/hostkey.before <(ssh-keyscan -t rsa localhost)  # equal
 ```
 
 ## Шаг 5. `rauc install` + rollback gate
@@ -203,9 +212,10 @@ diff /tmp/hostkey.before <(ssh-keyscan -t rsa localhost)  # equal
 ### 5.1. Зафиксировать исходное состояние
 
 ```bash
+mkdir -p /home/inauto/log/qemu-gate
 rauc status                              # booted slot и slot-статусы
-efibootmgr -v > /tmp/bootmgr.before
-cat /etc/inauto/firmware-version > /tmp/fw.before
+efibootmgr -v > /home/inauto/log/qemu-gate/bootmgr.before
+cat /etc/inauto/firmware-version > /home/inauto/log/qemu-gate/fw.before
 rauc status mark-good booted             # убеждаемся, что текущий slot — good
 ```
 
@@ -229,8 +239,8 @@ ls -la out/*.raucb
 # Внутри панели:
 rauc install /tmp/inauto-panel-ubuntu-amd64-pc-efi-dev.<N+1>.raucb
 
-efibootmgr -v > /tmp/bootmgr.after.install
-diff /tmp/bootmgr.before /tmp/bootmgr.after.install
+efibootmgr -v > /home/inauto/log/qemu-gate/bootmgr.after.install
+diff /home/inauto/log/qemu-gate/bootmgr.before /home/inauto/log/qemu-gate/bootmgr.after.install
 # Ожидаем появление BootNext, указывающего на system1 (если booted system0).
 ```
 
@@ -292,7 +302,7 @@ EOF
 
 ```bash
 rauc install /tmp/inauto-panel-ubuntu-amd64-pc-efi-dev.<N+2>.raucb
-efibootmgr -v > /tmp/bootmgr.after.install2
+efibootmgr -v > /home/inauto/log/qemu-gate/bootmgr.after.install2
 systemctl reboot
 ```
 
@@ -320,8 +330,8 @@ cat /proc/cmdline | grep -o 'rauc.slot=[^ ]*'
 cat /etc/inauto/firmware-version
 # Соответствует N+1 (или N, если rollback-тест шёл прямо от исходного).
 
-efibootmgr -v > /tmp/bootmgr.after.rollback
-diff /tmp/bootmgr.after.install2 /tmp/bootmgr.after.rollback
+efibootmgr -v > /home/inauto/log/qemu-gate/bootmgr.after.rollback
+diff /home/inauto/log/qemu-gate/bootmgr.after.install2 /home/inauto/log/qemu-gate/bootmgr.after.rollback
 # BootNext должен уже быть потрачен; BootOrder неизменён.
 ```
 
@@ -335,7 +345,10 @@ rm /home/inauto/config/healthcheck.sh
 
 Для runbook'а положите в отчёт:
 
-- `/tmp/bootmgr.before`, `/tmp/bootmgr.after.install`, `/tmp/bootmgr.after.install2`, `/tmp/bootmgr.after.rollback`
+- `/home/inauto/log/qemu-gate/bootmgr.before`,
+  `/home/inauto/log/qemu-gate/bootmgr.after.install`,
+  `/home/inauto/log/qemu-gate/bootmgr.after.install2`,
+  `/home/inauto/log/qemu-gate/bootmgr.after.rollback`
 - `rauc status` до и после каждого reboot'а
 - `journalctl -u rauc-mark-boot-good.service` (успех и failure)
 - `cat /etc/inauto/firmware-version` в каждой точке

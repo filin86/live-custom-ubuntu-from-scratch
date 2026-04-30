@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-labelledby="title desc">
+  <title id="title">Первый запуск после установки</title>
+  <desc id="desc">Схема успешной перезагрузки и проверки сервера обновлений.</desc>
+  <rect width="960" height="540" fill="#f5f7fb"/>
+  <text x="90" y="74" font-family="Arial, sans-serif" font-size="30" font-weight="700" fill="#1b2638">5. Первый запуск</text>
+  <rect x="90" y="115" width="780" height="330" rx="8" fill="#ffffff" stroke="#c7d0dd" stroke-width="2"/>
+  <circle cx="140" cy="165" r="18" fill="#16a34a"/>
+  <path d="M131 165 L138 173 L151 156" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="180" y="172" font-family="Arial, sans-serif" font-size="22" fill="#1b2638">Вытащите установочную флешку и нажмите перезагрузку.</text>
+  <circle cx="140" cy="235" r="18" fill="#16a34a"/>
+  <path d="M131 235 L138 243 L151 226" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="180" y="242" font-family="Arial, sans-serif" font-size="22" fill="#1b2638">Панель загружается с внутреннего диска.</text>
+  <circle cx="140" cy="305" r="18" fill="#16a34a"/>
+  <path d="M131 305 L138 313 L151 296" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="180" y="312" font-family="Arial, sans-serif" font-size="22" fill="#1b2638">Открывается рабочий стол пользователя ubuntu.</text>
+  <circle cx="140" cy="375" r="18" fill="#16a34a"/>
+  <path d="M131 375 L138 383 L151 366" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="180" y="382" font-family="Arial, sans-serif" font-size="22" fill="#1b2638">На сервере обновлений появляется отметка о связи.</text>
+</svg>

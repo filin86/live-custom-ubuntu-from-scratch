@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-labelledby="title desc">
+  <title id="title">Выбор диска панели</title>
+  <desc id="desc">Макет окна выбора внутреннего диска для установки.</desc>
+  <rect width="960" height="540" fill="#f5f7fb"/>
+  <rect x="100" y="70" width="760" height="400" rx="8" fill="#ffffff" stroke="#c7d0dd" stroke-width="2"/>
+  <rect x="100" y="70" width="760" height="54" rx="8" fill="#26364d"/>
+  <text x="126" y="106" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#ffffff">Inauto Panel Installer</text>
+  <text x="130" y="165" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#1b2638">Выберите диск панели</text>
+  <text x="130" y="200" font-family="Arial, sans-serif" font-size="18" fill="#4b5563">Диск будет полностью стёрт. Не выбирайте установочную флешку или флешку для копии.</text>
+  <rect x="130" y="235" width="700" height="48" fill="#eef2f7" stroke="#c7d0dd"/>
+  <text x="170" y="266" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#1b2638">Диск</text>
+  <text x="330" y="266" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#1b2638">Размер</text>
+  <text x="460" y="266" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#1b2638">Модель</text>
+  <rect x="130" y="283" width="700" height="58" fill="#ffffff" stroke="#c7d0dd"/>
+  <circle cx="150" cy="312" r="10" fill="#2563eb"/>
+  <text x="170" y="319" font-family="Arial, sans-serif" font-size="18" fill="#1b2638">/dev/sda</text>
+  <text x="330" y="319" font-family="Arial, sans-serif" font-size="18" fill="#1b2638">128G</text>
+  <text x="460" y="319" font-family="Arial, sans-serif" font-size="18" fill="#1b2638">Внутренний SSD</text>
+  <rect x="130" y="360" width="220" height="48" rx="6" fill="#2563eb"/>
+  <text x="188" y="391" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#ffffff">Далее</text>
+  <rect x="370" y="360" width="220" height="48" rx="6" fill="#f3f4f6" stroke="#c7d0dd"/>
+  <text x="425" y="391" font-family="Arial, sans-serif" font-size="20" fill="#374151">Отмена</text>
+</svg>

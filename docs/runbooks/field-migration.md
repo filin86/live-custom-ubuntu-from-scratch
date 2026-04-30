@@ -1,57 +1,61 @@
-# Runbook: миграция существующей mutable-панели на immutable firmware
+# Инструкция: миграция существующей панели на RAUC-систему
 
 Дата: 2026-04-20
-Применимость: панели, ранее прошитые старым ISO (mutable Ubuntu + casper).
+Применимость: панели, ранее прошитые старым ISO (изменяемая Ubuntu + casper).
 
-## Scope
+## Область применения
 
-Перевод панели с mutable ISO на immutable RAUC firmware. In-place
-repartitioning **не поддерживается** в первом production-релизе: диск
-полностью переразмечается. Поэтому процедура = backup + reflash + restore.
+Перевод панели со старого изменяемого ISO на неизменяемую RAUC-систему.
+Переразметка диска на месте **не поддерживается** в первом промышленном
+выпуске: диск полностью переразмечается. Поэтому процедура = резервная копия +
+переустановка + восстановление.
 
-**Downtime на панель:** ~30 минут (зависит от объёма `/home/inauto`).
+**Простой панели:** ~30 минут (зависит от объёма `/home/inauto`).
 
-**Автоматический путь (по умолчанию):** installer сам ищет существующее
-`/home/inauto` с маркером `.inautolock` на non-removable устройствах,
+**Автоматический путь (по умолчанию):** установщик сам ищет существующее
+`/home/inauto` с маркером `.inautolock` на несъёмных устройствах,
 архивирует его до разметки диска, исключая `staff/docker/`, и
 распаковывает обратно прямо в `/home/inauto/` после установки. Ручной
-rsync на ноутбук инженера — fallback для
+rsync на ноутбук инженера — запасной вариант для
 случаев, когда автомат не подходит (очень большой `/home/inauto`,
-особая топология дисков, debug).
+особая топология дисков, отладка).
 
 ## Предпосылки
 
-- Панель работает под старым ISO (mutable).
-- Accessible: SSH/локальный терминал, sudo-права (или физический доступ).
-- В `/home/inauto` лежат рабочие compose-проекты, Qt-app, site config.
-- Сетевой доступ до backup-хранилища (rsync/SSH target или USB).
+- Панель работает под старым изменяемым ISO.
+- Есть SSH/локальный терминал, sudo-права или физический доступ.
+- В `/home/inauto` лежат рабочие compose-проекты, Qt-приложение, настройки
+  объекта.
+- Есть сетевой доступ до хранилища резервных копий (rsync/SSH-цель или USB).
 
 ## Этапы
 
 ### Этап 1 — Подготовка
 
-На сборочном host'е (не на панели):
-- Собран installer payload нужной версии.
-- Подготовлен Ubuntu Live USB + вторая USB с payload + `.sha256`.
-- Проверено в QEMU (`docs/runbooks/qemu-pc-efi-test.md`), что bundle boot'ится.
+На сборочном узле (не на панели):
+- Собран ISO-образ установщика нужной версии. Запасной вариант:
+  загрузочная флешка Ubuntu/Debian + архив установщика `.tar.zst` + `.sha256` по
+  `docs/runbooks/install-from-installer-tar-zst.md`.
+- Проверено в QEMU (`docs/runbooks/qemu-pc-efi-test.md`), что RAUC-пакет
+  загружается.
 
 На панели:
 - Убедиться что Docker compose-проекты помечены labels'ами
   `com.docker.compose.*` (иначе `DockerComposeRestore.service` их не
   восстановит).
-- Сделать `docker compose pull` для всех проектов — чтобы после миграции
-  не зависеть от внешних registries.
+- Сделать `docker compose pull` для всех проектов, чтобы после миграции
+  не зависеть от внешних реестров контейнеров.
 
-### Этап 2 — Подготовка (до boot'а installer'а)
+### Этап 2 — Подготовка (до загрузки установщика)
 
-На работающей mutable-панели:
+На работающей старой панели:
 
 ```bash
-# Зафиксировать состояние compose (пригодится для audit после миграции):
+# Зафиксировать состояние compose (пригодится для проверки после миграции):
 sudo docker ps -a > /home/inauto/log/migration-docker-ps.txt
 sudo docker images > /home/inauto/log/migration-docker-images.txt
 
-# Остановить compose-проекты, чтобы не было активных writes в /home/inauto:
+# Остановить compose-проекты, чтобы не было активных записей в /home/inauto:
 for proj in $(docker compose ls -q); do
     docker compose -p "$proj" stop || true
 done
@@ -60,38 +64,43 @@ sync
 ```
 
 Убедитесь, что у `/home/inauto/.inautolock` правильный маркер —
-installer его использует для автодетекта.
+установщик использует его для автоопределения.
 
-### Этап 3 — Reflash через factory-provisioning runbook (с автоматическим backup'ом)
+### Этап 3 — Переустановка через заводскую инструкцию
 
-См. `docs/runbooks/factory-provisioning.md`. Installer сам делает backup
-и restore при миграции:
+См. `docs/runbooks/factory-provisioning.md`. Установщик сам делает резервную
+копию и восстановление при миграции:
 
-1. Boot с Ubuntu Live USB (mutable-система останавливается, `/home/inauto`
-   больше не пишется — мы теперь в live-сессии).
-2. Распаковать installer payload.
+1. Загрузиться с ISO-образа установщика (старая система останавливается,
+   `/home/inauto` больше не пишется — мы теперь во временной системе).
+   Запасной вариант: загрузиться с обычной флешки Ubuntu/Debian.
+2. Запустить мастер установки. Если используется запасной вариант с флешкой и
+   архивом `.tar.zst`, распаковать архив установщика в `/opt` и запустить
+   `/opt/inauto-installer/START-INSTALLER.sh`.
 3. Если `/home/inauto` большой (> ~30% RAM):
    ```
    export BACKUP_DIR=/media/<second-usb>/inauto-backup
    ```
-   Иначе — default `/tmp/inauto-backup` (tmpfs, живёт в RAM live-session).
-4. Запустить `install-to-disk.sh` с `TARGET_DEVICE=/dev/<внутренний_диск>`.
-   Скрипт покажет выбранный диск и продолжит только после ввода `yes`.
+   Иначе — `/tmp/inauto-backup` по умолчанию (tmpfs, живёт в памяти временной
+   системы).
+4. Запустить установку на внутренний диск. Графический мастер попросит ввести
+   `ERASE`; прямой запуск `install-to-disk.sh` с
+   `TARGET_DEVICE=/dev/<внутренний_диск>` продолжит только после ввода `yes`.
 
-Installer выполнит (в строгом порядке):
-- **Backup** — `backup-restore-home.sh backup` сканирует
-  non-removable блок-устройства на `.inautolock`, архивирует находку в
+Установщик выполнит (в строгом порядке):
+- **Резервная копия** — `backup-restore-home.sh backup` сканирует
+  несъёмные блочные устройства на `.inautolock`, архивирует находку в
   `$BACKUP_DIR/home-inauto.tar.zst` + `.sha256`, исключая `backup/`,
   `lost+found/` и `staff/docker/`.
-- GPT разметка, dd raw-образов, UEFI entries, persist/inauto-data
-  skeletons — всё как для новой панели.
-- **Restore** — `backup-restore-home.sh restore /home/inauto` —
-  распаковывает archive прямо в `inauto-data`, поверх свежего skeleton'а.
-- Reboot.
+- GPT-разметка, запись raw-образов, записи UEFI, заготовки persist/inauto-data —
+  всё как для новой панели.
+- **Восстановление** — `backup-restore-home.sh restore /home/inauto` —
+  распаковывает архив прямо в `inauto-data`, поверх свежей заготовки.
+- Перезагрузка.
 
 ### Этап 4 — Проверка восстановленного `/home/inauto`
 
-После reboot'а на immutable firmware:
+После перезагрузки в RAUC-систему:
 
 ```bash
 ssh ubuntu@<ip_панели>
@@ -101,26 +110,27 @@ ls /home/inauto/
 # Ожидаем рабочую структуру: on_start/, on_login/, staff/, log/ и т.п.
 
 du -sh /home/inauto/
-# Сравнить с backup-tarball'ом или с `du` исходной панели до миграции.
+# Сравнить с архивом резервной копии или с `du` исходной панели до миграции.
 test ! -e /home/inauto/staff/docker
-# Ожидаемо: loopback ext4 store НЕ возвращается из backup'а.
+# Ожидаемо: loopback ext4 store НЕ возвращается из резервной копии.
 ```
 
 Дополнительный ручной перенос из `/home/inauto/backup` больше не нужен:
-installer сразу возвращает данные в рабочий layout. Если какого-то файла
-не было в backup'е, остаётся созданный installer'ом skeleton.
+установщик сразу возвращает данные в рабочую структуру. Если какого-то файла
+не было в резервной копии, остаётся созданная установщиком заготовка.
 
-**Важно про permissions:** installer восстанавливает xattrs/ACL через
+**Важно про права:** установщик восстанавливает xattrs/ACL через
 `tar --acls --xattrs --xattrs-include='*'`, но UIDs внутри tarball'а отражают старую
-панель. Если user id'ы различаются (очень редко — autologin user =
+панель. Если идентификаторы пользователей различаются (очень редко —
+пользователь автологина =
 `ubuntu` с uid 1000 в обеих версиях), нужно `chown -R ubuntu:ubuntu
 /home/inauto/staff /home/inauto/on_login /home/inauto/on_start`.
 
-### Этап 4.1 — Fallback: ручной rsync (если автомат не подошёл)
+### Этап 4.1 — Запасной вариант: ручной rsync
 
 Если `/home/inauto` слишком большой и `BACKUP_DIR` на второй USB тоже
-не помещает (редкий кейс — десятки ГБ compose-образов в rootfs панели),
-используется ручной rsync на ноутбук инженера ДО запуска installer'а:
+не помещает (редкий случай — десятки ГБ compose-образов в rootfs панели),
+используется ручной rsync на ноутбук инженера ДО запуска установщика:
 
 ```bash
 # На панели:
@@ -132,17 +142,17 @@ rsync -aHAXv --progress \
     engineer@laptop:/backup/panels/<serial>/home-inauto/
 
 ssh engineer@laptop 'du -sh /backup/panels/<serial>/home-inauto/'
-# Сверить с local `du -sh /home/inauto/`.
+# Сверить с локальным `du -sh /home/inauto/`.
 ```
 
-Затем запустить installer **без** backup-шага:
+Затем запустить установщик **без** шага резервного копирования:
 
 ```bash
 SKIP_BACKUP=1 /opt/inauto-installer/install-to-disk.sh
-# Installer всё равно попросит подтвердить стирание выбранного диска вводом `yes`.
+# Установщик всё равно попросит подтвердить стирание выбранного диска вводом `yes`.
 ```
 
-После reboot'а restore'ить данные rsync'ом обратно:
+После перезагрузки восстановить данные rsync'ом обратно:
 
 ```bash
 rsync -aHAXv --progress \
@@ -152,69 +162,70 @@ rsync -aHAXv --progress \
 
 ### Этап 5 — Восстановление compose-проектов
 
-`DockerComposeRestore.service` запускается при boot'е и для всех
+`DockerComposeRestore.service` запускается при загрузке и для всех
 compose-проектов с labels делает `docker compose up -d`. Но на свежем
 rootfs образы не загружены (container-store пустой). Поэтому:
 
 ```bash
-# Либо reboot — сервис сам поднимет:
+# Либо перезагрузка — сервис сам поднимет:
 systemctl reboot
 
-# Либо руками, не дожидаясь reboot'а:
+# Либо вручную, не дожидаясь перезагрузки:
 for compose_dir in $(find /home/inauto -name docker-compose.yml -o -name compose.yaml); do
     cd "$(dirname "$compose_dir")"
     docker compose up -d
 done
 ```
 
-Образы скачаются в `container-store` и после первого reboot'а будут
+Образы скачаются в `container-store` и после первой перезагрузки будут
 автовосстанавливаться.
 
-### Этап 6 — Проверка hostname, канала и serial
+### Этап 6 — Проверка имени панели, канала и серийного номера
 
 ```bash
 cat /home/inauto/staff/hostname
 cat /etc/inauto/{update-server,channel,serial.txt}
 
 systemctl restart panel-check-updates.timer
+systemctl start panel-check-updates.service
 ```
 
-Ожидаемо installer уже заполнил:
+Ожидаемо установщик уже заполнил:
 
-- `/home/inauto/staff/hostname` — hostname панели, введённый оператором;
-- `/etc/inauto/channel` — выбранный channel (`stable` или `candidate`);
+- `/home/inauto/staff/hostname` — имя панели, введённое оператором;
+- `/etc/inauto/channel` — выбранный канал (`stable` или `candidate`);
 - `/etc/inauto/update-server` — выбранный URL сервера;
 - `/etc/inauto/serial.txt` — `<hostname>-<uuid>`.
 
-### Этап 7 — Acceptance
+### Этап 7 — Приёмка
 
-Прогон checklist из `factory-provisioning.md` раздел "Acceptance".
+Прогон проверочного списка из `factory-provisioning.md`.
 Дополнительно:
 
 - [ ] Все compose-проекты из миграции работают (`docker compose ls`).
-- [ ] Объём `/home/inauto` соответствует backup'у (`du -sh` сравнение).
-- [ ] На update-сервере появился heartbeat с правильным `serial`.
-- [ ] 24 часа soak'а на панели до признания миграции успешной.
+- [ ] Объём `/home/inauto` соответствует резервной копии (`du -sh` сравнение).
+- [ ] На сервере обновлений появилась отметка о связи с правильным серийным номером.
+- [ ] 24 часа проверки под нагрузкой на панели до признания миграции успешной.
 
-## Rollback к старому ISO
+## Откат к старому ISO
 
 Если после миграции панель не работает и срочно нужно вернуть старый
 ISO — обратный путь:
 
-1. Boot с Ubuntu Live USB.
-2. Если backup tarball или rsync-копия сохранились на внешнем носителе —
+1. Загрузиться с флешки Ubuntu.
+2. Если архив резервной копии или rsync-копия сохранились на внешнем носителе —
    используйте их; иначе снимите свежую rsync-копию с текущего `/home/inauto`.
 3. Прошить старую ISO-версию (прежние команды `./scripts/build.sh -`
    и `dd` образа).
-4. Restore `/home/inauto` через rsync.
+4. Восстановить `/home/inauto` через rsync.
 
 ## Чего делать нельзя
 
-- **In-place переразметить диск без backup'а.** Риск потерять compose-данные.
-- **Скопировать `/persist` со старой панели на новую immutable-панель.**
-  Старый `/persist` не существует на mutable ISO — это раздел появляется
-  только после install'а immutable firmware. Не путать с `/home/inauto`.
-- **Оставить панель на dev-канале в production.** `/etc/inauto/channel`
+- **Переразмечать диск на месте без резервной копии.** Риск потерять compose-данные.
+- **Скопировать `/persist` со старой панели на новую RAUC-панель.**
+  Старый `/persist` не существует на изменяемом ISO — это раздел появляется
+  только после установки RAUC-системы. Не путать с `/home/inauto`.
+- **Оставить панель на dev-канале в эксплуатации.** `/etc/inauto/channel`
   должен быть `stable` после миграции.
-- **Skip 24h soak.** Даже если всё визуально работает — прогнать сутки
-  на панели под реальной нагрузкой перед подтверждением.
+- **Пропускать 24-часовую проверку.** Даже если всё визуально работает —
+  прогнать сутки на панели под реальной нагрузкой перед подтверждением.

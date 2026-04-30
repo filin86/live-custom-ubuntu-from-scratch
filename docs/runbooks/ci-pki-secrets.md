@@ -1,25 +1,36 @@
-# Runbook: CI secrets для RAUC signing и update-server deploy
+# Инструкция: секреты CI для подписи RAUC и сервера обновлений
 
 Дата: 2026-04-20
-Применимость: GitLab CI (`.gitlab-ci.yml`) + production PKI.
+Применимость: GitLab CI (`.gitlab-ci.yml`) + промышленная PKI.
 
 ## Перечень переменных
 
-| Variable | Тип GitLab | Protected | Masked | Где используется | Ротация |
+| Переменная | Тип GitLab | Protected | Masked | Где используется | Ротация |
 |---|---|---|---|---|---|
-| `RAUC_SIGNING_CERT` | **File** | yes | — | `rauc bundle --cert` (путь к файлу) | 3-5 лет, default 5 лет |
-| `RAUC_SIGNING_KEY` | **File** | yes | — | `rauc bundle --key` (путь к файлу) | 3-5 лет, default 5 лет |
-| `RAUC_INTERMEDIATE_CERT` | **File** (optional) | yes | — | `rauc bundle --intermediate` | вместе со signing |
-| `RAUC_KEYRING` | **File** | yes | — | PEM (`prod-keyring.pem`) → rootfs `/etc/rauc/keyring.pem` и installer payload | раз в 20 лет (ротация root CA) |
-| `UPDATE_SERVER_DEPLOY_TOKEN` | Variable | yes | **yes** | `curl -H "Authorization: Bearer ..."` к `/api/upload` | при compromise или раз в 6–12 мес |
-| `UPDATE_SERVER_URL` | Variable | yes | no | базовый URL для upload | при смене инфраструктуры |
+| `RAUC_SIGNING_CERT` | **File** | yes | — | `rauc bundle --cert` (путь к файлу) | 3-5 лет, по умолчанию 5 лет |
+| `RAUC_SIGNING_KEY` | **File** | yes | — | `rauc bundle --key` (путь к файлу) | 3-5 лет, по умолчанию 5 лет |
+| `RAUC_INTERMEDIATE_CERT` | **File** (опционально) | yes | — | `rauc bundle --intermediate` | вместе с сертификатом подписи |
+| `RAUC_KEYRING` | **File** | yes | — | PEM (`prod-keyring.pem`) → rootfs `/etc/rauc/keyring.pem` и архив установщика | раз в 20 лет (ротация root CA) |
+| `UPDATE_SERVER_DEPLOY_TOKEN` | Variable | yes | **yes** | `curl -H "Authorization: Bearer ..."` к `/api/upload` | при компрометации или раз в 6-12 мес |
+| `UPDATE_SERVER_URL` | Variable | yes | no | базовый URL для загрузки | при смене инфраструктуры |
 
-**`RAUC_KEYRING` vs `RAUC_SIGNING_CERT`**: signing cert используется один раз — CI подписывает им bundle, после чего cert физически уходит в подпись артефакта. Keyring же попадает в rootfs и installer как public trust anchor: panel без него НЕ доверяет ни одному prod bundle'у, factory install с dev keyring'ом отвергнет prod-signed payload уже на этапе verify/mount bundle. Поэтому в release-mode pipeline пробрасывает обе переменные; при отсутствии `RAUC_KEYRING` build прерывается на этапе restore signing keypair.
+**`RAUC_KEYRING` и `RAUC_SIGNING_CERT`**: сертификат подписи используется один
+раз — CI подписывает им RAUC-пакет, после чего сертификат физически уходит в
+подпись артефакта. Keyring попадает в rootfs и установщик как доверенный
+корневой набор: панель без него НЕ доверяет ни одному промышленному
+RAUC-пакету, заводская установка с dev-keyring отвергнет prod-подписанный
+архив уже на этапе проверки и монтирования RAUC-пакета. Поэтому конвейер
+копирует `RAUC_KEYRING` во временный файл и передаёт его как
+`RAUC_KEYRING_PATH` и `INSTALLER_KEYRING_SRC`; при промышленной подписи без
+keyring сборка прерывается.
 
-Пометка **Protected** означает, что variable доступна только protected branches/tags — наши release-теги `vYYYY.MM.DD.N` обязаны быть protected в `Settings → Repository → Protected tags`, иначе pipeline со secret'ами не запустится на форк-коммитах или неавторизованных тегах.
+Пометка **Protected** означает, что переменная доступна только защищённым
+веткам и тегам. Наши выпускные теги `vYYYY.MM.DD.N` обязаны быть защищены в
+`Settings → Repository → Protected tags`, иначе конвейер с секретами не
+запустится на форк-коммитах или неавторизованных тегах.
 
-Root CA private key (`prod-root-ca.key`) **НИКОГДА** не загружается в CI.
-Все подписи signing-сертификата делаются offline на air-gap машине —
+Приватный ключ Root CA (`prod-root-ca.key`) **НИКОГДА** не загружается в CI.
+Все подписи сертификата подписи делаются вне сети на изолированной машине —
 см. `pki/README.md` шаги 1–2.
 
 ## GitLab CI
@@ -93,7 +104,7 @@ script:
 
 ### Шаг 3. Маскирование в логах
 
-GitLab CI автоматически маскирует masked variables (typу String, ≥8
+GitLab CI автоматически маскирует masked variables (тип String, ≥8
 символов, без многострочных паттернов). File-type variables в логах
 не появляются, потому что фигурирует только путь, не содержимое.
 
@@ -108,8 +119,8 @@ GitLab CI автоматически маскирует masked variables (typу 
 - `rauc bundle --cert="$RAUC_SIGNING_CERT"` — пишет путь, не содержимое.
 - `curl -H "@-" < token_file` — если бы мы клали token в файл.
 
-В `.gitlab-ci.yml` avoided `set -x` во всех job'ах; масcr масcr маскирование
-полагается на `masked: true` для `UPDATE_SERVER_DEPLOY_TOKEN`.
+В `.gitlab-ci.yml` `set -x` не используется; маскирование полагается на
+`masked: true` для `UPDATE_SERVER_DEPLOY_TOKEN`.
 
 ### Шаг 4. Artifacts
 
@@ -133,7 +144,7 @@ download'а / публикации в release asset'ы.
 2. Скопировать `prod-signing.crt` / `prod-signing.key` на флешку.
 3. На online-машине (админ): в GitLab `Project → Settings → CI/CD →
    Variables` найти `RAUC_SIGNING_CERT` и `RAUC_SIGNING_KEY` → `Edit` →
-   переaploadить файлы через UI ("Remove" предыдущие File, "Add" новые с
+   перезагрузить файлы через UI ("Remove" предыдущие File, "Add" новые с
    тем же именем и `Protected/File` флагами).
 4. Удалить файлы с флешки и с air-gap (оставив backup root CA).
 5. Следующий CI-run подписывает bundle'ы новым signing cert'ом. Панели
@@ -147,7 +158,7 @@ download'а / публикации в release asset'ы.
    echo "INAUTO_UPLOAD_TOKEN=$new_token" > /etc/inauto-update/env
    docker compose up -d api
    ```
-2. Обновить GitHub secret `UPDATE_SERVER_DEPLOY_TOKEN`.
+2. Обновить GitLab CI/CD variable `UPDATE_SERVER_DEPLOY_TOKEN`.
 3. Старый token становится невалидным мгновенно.
 
 ### Root CA (раз в 20 лет)
