@@ -5,6 +5,30 @@
 
 ## [Unreleased]
 
+### Added — подавление шума загрузки/выключения
+- `config.sh::quiet_boot_noise()` (вызывается из `customize_image()`) заносит `snd_hda_intel` в blacklist (`/etc/modprobe.d` + `install ... /bin/true`) — HDA-кодек на панелях не отвечает, из-за чего выключение стабильно тормозило на `azx_get_response timeout` (~3 сек); звук панелям не нужен.
+- На RAUC-target (`TARGET_FORMAT=rauc`) `casper-md5check.service` теперь маскируется через `systemctl mask` — это чисто live-ISO проверка контрольных сумм, на immutable-образе она всегда падала и засоряла лог загрузки.
+
+### Changed — переход на GRUB-схему выбора A/B-слота (pc-efi v2, RAUC bootloader=grub)
+- **Причина:** прошивка панелей перезаписывает UEFI `BootOrder` на каждом POST (пересортировывает записи `\EFI\BOOT\BOOTX64.EFI` по номеру раздела и демотирует записи с уникальным путём к загрузчику) — после второй перезагрузки система откатывалась на предыдущий слот, а одноразовый `BootNext` прошивка уважает лишь на один боот вперёд. Ранее опробованный обходной путь — скрипт `panel-commit-bootorder.sh`, переставлявший `BootOrder` первым слотом после `rauc-mark-boot-good` — был проверен на реальном железе и **не сработал** (подтверждено тестовой записью `RAUCPROBE`, которую прошивка демотировала так же, как остальные); скрипт удалён из обоих профилей до релиза, в ISO так и не попал. Дизайн итогового решения — `docs/2026-07-04-grub-boot-selection-design.md`.
+- GPT-раскладка дисков не меняется; `efi_A` теперь несёт единый GRUB standalone-загрузчик (`\EFI\BOOT\BOOTX64.EFI` + `grub.cfg` + `grubenv`), `efi_B` — его резервную копию. Активный слот выбирается через переменные `grubenv` (`ORDER`, `<slot>_OK`, `<slot>_TRY`) с автоматическим откатом по TRY-счётчику — UEFI `BootOrder`/`BootNext` для выбора слота больше не используются.
+- `kernel`/`initrd` и `/boot/grub-slot.cfg` перенесены внутрь squashfs rootfs; RAUC bundle стал rootfs-only (manifest без секции `[image.efi]`), GRUB читает kernel/initrd прямо с rootfs-раздела (xz-сжатый squashfs, проверено `grub-fstest` 2.12).
+- Новый `scripts/targets/rauc/build-boot-grub.sh` собирает `boot.vfat` (`grub-mkstandalone` + преднастроенный `grubenv`) — используется и как релизный артефакт, и как payload заводского инсталлятора; новый `scripts/targets/rauc/grub/grub.cfg`.
+- Новый mount-юнит `run-inauto-bootenv.mount` монтирует `grubenv` в `/run/inauto/bootenv` + drop-in для `rauc.service`; функция `install_rauc_boot_artifacts()` в `config.sh` устанавливает `/boot`-артефакты.
+- `system-efi.conf.template`: `bootloader=grub`, слоты `rootfs.0`/`rootfs.1` с `bootname system0`/`system1`.
+- **BREAKING:** `RAUC_COMPATIBLE_VERSION` поднят до `v2` — bundle'ы старой (v1, BootOrder-based) схемы несовместимы с новым GRUB-загрузчиком без миграции.
+- Поднята версия конфига до 0.7 (требуется обновить локальный `scripts/config.sh`) — новые переменные GRUB boot-схемы (`build.sh`, `config-installer.sh`).
+- `installer/install-to-disk.sh`: `boot.vfat` теперь пишется в оба `efi_A`+`efi_B`; NVRAM-записи слотов больше не создаются (только зачистка устаревших записей от старой схемы). `docker/Builder.Dockerfile`: добавлены `grub-common`, `grub-efi-amd64-bin`.
+- `panel-update.sh`: добавлен режим миграции v1→v2 без заводского инсталлятора — `rauc mount` с проверкой подписи → `dd` rootfs в неактивный слот → `dd` `boot.vfat` в оба ESP → запись `grubenv` → зачистка NVRAM → reboot; поиск bundle дополнительно ведётся в `/home/inauto/update`. `rauc-mark-boot-good.service` лишился `ExecStartPost=` (закреплявшего `BootOrder`) и теперь зависит от bootenv-mount.
+- Runbooks обновлены: `docs/runbooks/update-from-raucb.md` (раздел миграции, шаг 5 — проверка `grubenv` вместо `efibootmgr`) и `docs/runbooks/rollback.md` (`grub-editenv` вместо `efibootmgr`).
+
+### Added — Драйвер Realtek RTL8125 (2.5 GbE) и кнопка питания
+- В `config.sh` функция `install_r8125_driver()` (вызов из `customize_image()`) собирает вендорный драйвер Realtek RTL8125 (2.5GbE) из закреплённых исходников вместо пакета `r8125-dkms` из noble/multiverse: пакетная версия — старая ветка 9.011 (2022), на новых ревизиях чипа битый RX-путь (линк поднимается, но DHCP не отвечает, интерфейс вечно «connecting», плюс лишняя вторая иконка NetworkManager в трее). Скачивается pinned r8125 9.016.01 (мирор awesometic/realtek-r8125-dkms, закреплённые URL + sha256, с проверкой) и собирается через DKMS для каждого целевого ядра по `/lib/modules/*/build` прямо в chroot — на immutable RAUC-панели DKMS в runtime недоступен, пересборка невозможна. Если `r8125.ko` не собрался ни для одного ядра, сборка прерывается с ошибкой. Точечный udev-override (r8169→r8125 только для PCI `10ec:8125`) не изменился.
+- В `config.sh` добавлена функция `configure_power_button()` (вызов из `custom_conf()`): записывает системный xfconf-файл `/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml` с `logind-handle-power-key=true` и `power-button-action=4` (XFPM_DO_SHUTDOWN). Кнопка питания теперь корректно выключает систему вместо недетерминированного поведения Ubuntu 24.04 по умолчанию; работает и на immutable RAUC-панели с tmpfs-overlay.
+
+### Fixed
+- `scripts/build-rauc-release.sh`: исправлен разбор аргументов — позиционный `N` (номер билда за день) и флаг `--clean-cache` теперь разбираются явно; `--clean-cache` пробрасывается в `build-rauc-installer.sh` через массив `clean_cache_args` только при реальной передаче. Добавлены `usage()` и флаги `-h/--help`; неизвестные аргументы отвергаются.
+
 ### Added — Immutable panel firmware (RAUC target, phases 0–9)
 - Новая цель сборки `TARGET_FORMAT=rauc` для immutable operator-панелей с A/B обновлениями через RAUC. ISO-путь остаётся дефолтом и не меняется.
 - `TARGET_PLATFORM=pc-efi` (UEFI PC, MVP); `<board>-uboot` зарезервирован для планшетов после идентификации BSP.

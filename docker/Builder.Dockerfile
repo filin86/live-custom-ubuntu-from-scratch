@@ -66,9 +66,9 @@ RUN chmod 0755 /usr/local/sbin/install-rauc-source.sh
 # RAUC target build-time dependencies.
 # Host-side utilities for partition layout, FAT image assembly, bundle signing,
 # initramfs generation and UEFI boot-entry management on the installer.
-# GRUB and systemd-boot are deliberately NOT installed — RAUC target uses
-# EFI-stub kernel + external initrd, with RAUC EFI backend managing boot entries
-# through efibootmgr.
+# grub-common + grub-efi-amd64-bin нужны build-boot-grub.sh: единый GRUB
+# standalone выбирает RAUC-слот по grubenv (прошивка панелей переписывает
+# BootOrder на каждом POST, поэтому RAUC EFI backend не используется).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         rauc \
         dosfstools \
@@ -78,6 +78,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         kmod \
         initramfs-tools \
         efibootmgr \
+        grub-common \
+        grub-efi-amd64-bin \
     && /usr/local/sbin/install-rauc-source.sh \
     && rm -rf /var/lib/apt/lists/*
 

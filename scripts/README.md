@@ -129,7 +129,7 @@ BUILDER_PLATFORM=linux/amd64 ./build-in-docker.sh -
 TARGET_FORMAT=rauc TARGET_PLATFORM=pc-efi ./build-in-docker.sh -
 ```
 
-После фаз 0–4 включительно доступна полная сборка `.raucb` bundle'а: `build_iso` останавливается после `mksquashfs` при `TARGET_FORMAT=rauc`, затем отдельный stage `build_rauc_bundle` собирает `efi.vfat` (kernel + initrd) и подписывает bundle ключами из `RAUC_SIGNING_CERT`/`RAUC_SIGNING_KEY` (по умолчанию dev-ключи из `pki/`). Готовый артефакт лежит в `out/inauto-panel-<distro>-<arch>-pc-efi-<version>.raucb`.
+После фаз 0–4 включительно доступна полная сборка `.raucb` bundle'а: `build_iso` останавливается после `mksquashfs` при `TARGET_FORMAT=rauc`, затем отдельный stage `build_rauc_bundle` подписывает rootfs-only bundle ключами из `RAUC_SIGNING_CERT`/`RAUC_SIGNING_KEY` (по умолчанию dev-ключи из `pki/`) и собирает `boot.vfat` (единый GRUB, см. `docs/2026-07-04-grub-boot-selection-design.md`). Готовые артефакты лежат в `out/`: `inauto-panel-<distro>-<arch>-pc-efi-<version>.raucb` (+`.sha256`) и `boot.vfat` (+`.sha256`).
 
 Ключевые RAUC-переменные (см. `config.sh`):
 

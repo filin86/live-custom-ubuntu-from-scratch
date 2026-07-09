@@ -43,7 +43,9 @@ cp "$SQUASHFS_SRC" "$WORK_DIR/rootfs.img"
 
 case "${TARGET_PLATFORM}" in
     pc-efi)
-        "$RAUC_TARGETS_DIR/build-boot-vfat.sh" "$WORK_DIR"
+        # Bundle = только rootfs.img: kernel/initrd + grub-slot.cfg лежат внутри
+        # squashfs (/boot), их читает единый GRUB с раздела efi_A (boot.vfat
+        # собирается build-boot-grub.sh и ставится заводским инсталлятором).
         manifest_tmpl="$RAUC_TARGETS_DIR/manifest-efi.raucm.template"
         ;;
     *-uboot)
@@ -56,10 +58,17 @@ esac
 
 [[ -f "$manifest_tmpl" ]] || fail "manifest template не найден: $manifest_tmpl"
 
-log "рендерю manifest.raucm"
+# Build-id — информативные метаданные сборки (поле Build в `rauc info`), НЕ версия.
+# По умолчанию git describe; при недоступности git — падаем на версию bundle.
+# CI может переопределить через RAUC_BUILD_ID (например, номер pipeline).
+RAUC_BUILD_ID="${RAUC_BUILD_ID:-$(git -C "$REPO_ROOT" describe --always --dirty --tags 2>/dev/null || true)}"
+[[ -n "$RAUC_BUILD_ID" ]] || RAUC_BUILD_ID="$RAUC_BUNDLE_VERSION"
+
+log "рендерю manifest.raucm (build=$RAUC_BUILD_ID)"
 sed \
     -e "s|@COMPATIBLE@|$COMPAT|g" \
     -e "s|@RAUC_BUNDLE_VERSION@|$RAUC_BUNDLE_VERSION|g" \
+    -e "s|@RAUC_BUILD_ID@|$RAUC_BUILD_ID|g" \
     "$manifest_tmpl" > "$WORK_DIR/manifest.raucm"
 
 SIGN_CERT="${RAUC_SIGNING_CERT:-}"
@@ -97,5 +106,29 @@ rm -f "$ARTIFACT"
 rauc "${rauc_args[@]}"
 
 log "готово: $ARTIFACT"
+
+# Контрольная сумма рядом с bundle. Пишем basename (а не полный путь), чтобы
+# `sha256sum -c <bundle>.sha256` работал из каталога с bundle — как в
+# docs/runbooks/update-from-raucb.md и в панельном скрипте panel-update.
+log "генерирую SHA256 контрольную сумму"
+(
+    cd "$OUT_DIR"
+    sha256sum "$(basename "$ARTIFACT")" > "$(basename "$ARTIFACT").sha256"
+)
+log "готово: $ARTIFACT.sha256"
+
+# boot.vfat — образ загрузочного раздела (единый GRUB + grubenv). Релизный
+# артефакт: нужен заводскому инсталлятору и миграции v1->v2 через panel-update
+# (dd в efi_A/efi_B). Собирается детерминированно, версии не имеет.
+if [[ "${TARGET_PLATFORM}" == "pc-efi" ]]; then
+    log "собираю boot.vfat (GRUB standalone)"
+    "$RAUC_TARGETS_DIR/build-boot-grub.sh" "$OUT_DIR"
+    (
+        cd "$OUT_DIR"
+        sha256sum boot.vfat > boot.vfat.sha256
+    )
+    log "готово: $OUT_DIR/boot.vfat (+ .sha256)"
+fi
+
 rauc info --keyring="$REPO_ROOT/pki/dev-keyring.pem" "$ARTIFACT" || \
     log "WARNING: не удалось verify bundle локальным dev-keyring'ом (возможно подписан prod-ключом)"

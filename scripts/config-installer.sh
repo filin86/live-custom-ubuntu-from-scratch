@@ -3,7 +3,7 @@
 # Copied into chroot as /root/config.sh when INAUTO_IMAGE_ROLE=factory-installer.
 # Do NOT source this for panel image builds — use config.sh instead.
 
-export CONFIG_FILE_VERSION="0.6"
+export CONFIG_FILE_VERSION="0.7"
 
 # This file configures only the live environment that runs the installer.
 # Target OS/platform metadata is kept in config.sh and passed through build.sh.

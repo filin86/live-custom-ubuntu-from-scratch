@@ -54,7 +54,9 @@ export RAUC_PINNED_VERSION="${RAUC_PINNED_VERSION:-1.15.2}"
 
 # Version suffix for RAUC compatible strings:
 # inauto-panel-<distro>-<arch>-<platform>-<RAUC_COMPATIBLE_VERSION>.
-export RAUC_COMPATIBLE_VERSION="${RAUC_COMPATIBLE_VERSION:-v1}"
+# v2: загрузка через единый GRUB на efi_A (bundle rootfs-only); v1-панели
+# мигрируются заводским инсталлятором (см. docs/2026-07-04-grub-boot-selection-design.md).
+export RAUC_COMPATIBLE_VERSION="${RAUC_COMPATIBLE_VERSION:-v2}"
 
 # Size of the tmpfs overlay upper layer for the immutable RAUC rootfs.
 export INAUTO_OVERLAY_SIZE="${INAUTO_OVERLAY_SIZE:-2G}"
@@ -81,7 +83,7 @@ export TARGET_PACKAGE_REMOVE="
 
 # Used to version the configuration. If breaking changes occur, manual
 # updates to this file from the default may be necessary.
-export CONFIG_FILE_VERSION="0.6"
+export CONFIG_FILE_VERSION="0.7"
 
 HOMEPATH="/home/inauto"
 ETCPATH="/etc/inauto"
@@ -132,6 +134,7 @@ function custom_conf() {
     configure_live_username
     enable_on_screen_kbd
     enable_vnc
+    configure_power_button
 
     disable_updates
     disable_oopsie
@@ -165,6 +168,7 @@ function custom_conf() {
 
     remove_unused_features
     remove_dangerous
+    quiet_boot_noise
 }
 
 function purge_installed_packages() {
@@ -256,6 +260,26 @@ function remove_dangerous() {
         ffmpeg
 }
 
+# Глушит косметический шум на загрузке/выключении, не влияющий на работу панели.
+#  - snd_hda_intel: на этих платах HDA-кодек не отвечает → таймауты
+#    azx_get_response (~3с к выключению). Звук панелям не нужен — блокируем модуль.
+#  - casper-md5check.service: проверка контрольных сумм live-ISO, на immutable
+#    RAUC-системе (squashfs на разделе) бессмысленна и всегда падает — маскируем.
+function quiet_boot_noise() {
+    install -d -m 0755 /etc/modprobe.d
+    cat <<'EOF_SND' > /etc/modprobe.d/blacklist-inauto-audio.conf
+# Панелям звук не нужен; HDA-кодек не отвечает и вешает таймауты azx_get_response.
+blacklist snd_hda_intel
+install snd_hda_intel /bin/true
+EOF_SND
+    chmod 0644 /etc/modprobe.d/blacklist-inauto-audio.conf
+
+    # casper-md5check осмыслен только на live-ISO; на RAUC-target — мусор.
+    if rauc_enabled; then
+        systemctl mask casper-md5check.service 2>/dev/null || true
+    fi
+}
+
 function exec_files_in_folder() {
     cat <<EOF_SCRIPT > "$ETCPATH/$EXECFILESINFOLDER"
 #!/bin/bash
@@ -324,11 +348,15 @@ function customize_image() {
         mtools \
         iputils-ping \
         libxcb-cursor0 \
+        pciutils \
+        usbutils \
         rsync \
         ufw \
         x11vnc \
         dbus-x11 \
         e2fsprogs
+
+    install_r8125_driver
 
     install_docker_engine
 
@@ -1117,6 +1145,186 @@ function enable_on_screen_kbd() {
     apt-get install -y onboard
 }
 
+# Кнопка питания -> действие выключения XFCE.
+#
+# По умолчанию в Ubuntu 24.04 systemd-logind обрабатывает power-key сам
+# (HandlePowerKey=poweroff), а xfce4-power-manager в это не вмешивается. Здесь мы
+# задаём СИСТЕМНЫЙ xfconf-дефолт (в /etc/xdg, т.к. XDG_CONFIG_DIRS=/etc/xdg):
+# xfce4-power-manager перехватывает power-key у logind (logind-handle-power-key=true,
+# ставит inhibitor, logind делегирует событие) и выполняет заданное действие
+# (power-button-action=4 = XFPM_DO_SHUTDOWN — корректное выключение без диалога;
+# 3 = XFPM_ASK, если понадобится вернуть диалог-меню).
+#
+# Файл read-only и лежит в системном каталоге, поэтому корректно работает и на
+# immutable RAUC-панели с tmpfs-overlay поверх домашнего каталога.
+function configure_power_button() {
+    local xfconf_dir="/etc/xdg/xfce4/xfconf/xfce-perchannel-xml"
+
+    install -d -m 0755 "$xfconf_dir"
+    cat <<'EOF_XFPM' > "$xfconf_dir/xfce4-power-manager.xml"
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfce4-power-manager" version="1.0">
+  <property name="xfce4-power-manager" type="empty">
+    <!-- power-button-action=4 -> XFPM_DO_SHUTDOWN (выключить сразу, без диалога) -->
+    <property name="power-button-action" type="uint" value="4"/>
+    <!-- xfce4-power-manager перехватывает power-key у systemd-logind -->
+    <property name="logind-handle-power-key" type="bool" value="true"/>
+  </property>
+</channel>
+EOF_XFPM
+    chmod 0644 "$xfconf_dir/xfce4-power-manager.xml"
+}
+
+# ============================================================================
+# Драйвер сетевого контроллера Realtek RTL8125 (2.5GbE).
+#
+# In-kernel r8169 в noble не поддерживает нашу ревизию RTL8125 (в dmesg
+# "unknown chip XID ... error -ENODEV"), а пакетный r8125-dkms в multiverse —
+# старая ветка 9.011 (2022): на новых ревизиях чипа у неё битый RX (линк
+# поднимается, но DHCP не получает ответа, интерфейс вечно "connecting").
+# Поэтому собираем вендорный r8125 из ЗАКРЕПЛЁННЫХ исходников (pinned версия +
+# URL + sha256, как в scripts/targets/rauc/install-rauc-source.sh). Мирор
+# awesometic/realtek-r8125-dkms содержит официальные исходники Realtek + dkms.conf.
+#
+# Модуль ОБЯЗАН собраться на этапе билда внутри chroot: на immutable RAUC-панели
+# rootfs read-only и dkms на целевой системе уже ничего не пересоберёт. При этом
+# `uname -r` в chroot указывает на ядро билдера, а не образа, поэтому собираем
+# явно под каждое целевое ядро (определяем по наличию /lib/modules/<kver>/build).
+function install_r8125_driver() {
+    local kver
+    local found_ko
+    local built_count=0
+    local target_kernels=()
+
+    # Закреплённая версия вендорного драйвера (source build). Тег на мирроре —
+    # <ver>-<pkgrel>; внутри архива dkms.conf уже с PACKAGE_NAME/PACKAGE_VERSION.
+    local r8125_version="9.016.01"
+    local r8125_src_url="https://github.com/awesometic/realtek-r8125-dkms/archive/refs/tags/9.016.01-1.tar.gz"
+    local r8125_src_sha256="7dd086213b4ac151532dc826283f3cd86ee23111d394ca47e575c1574bf71b15"
+    local r8125_dkms_name="realtek-r8125"   # = PACKAGE_NAME в dkms.conf тарбола
+    local work_dir src_dir extracted
+
+    # Целевые ядра образа — все установленные в chroot (ядро билдера сюда не
+    # попадает, его модулей в chroot нет). find -printf даёт чистые имена без
+    # возни с nullglob/shopt (который при сорсинге менял бы состояние вызвавшей
+    # оболочки).
+    mapfile -t target_kernels < <(
+        find /lib/modules -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V
+    )
+
+    if [[ ${#target_kernels[@]} -eq 0 ]]; then
+        echo "[r8125] ERROR: в /lib/modules нет ни одного установленного ядра" >&2
+        exit 1
+    fi
+
+    # Тулчейн DKMS + инструменты для загрузки исходников.
+    apt-get install -y --no-install-recommends \
+        dkms \
+        build-essential \
+        ca-certificates \
+        curl \
+        xz-utils
+    # Заголовки под каждое целевое ядро (в chroot uname -r — ядро билдера).
+    for kver in "${target_kernels[@]}"; do
+        apt-get install -y --no-install-recommends "linux-headers-$kver" \
+            || echo "[r8125] WARNING: не удалось поставить linux-headers-$kver; dkms может не собраться" >&2
+    done
+
+    # Разворачиваем закреплённые исходники в /usr/src и регистрируем в dkms.
+    # Идемпотентно: если дерево уже на месте (установлено атомарно через mv),
+    # повторно не качаем.
+    src_dir="/usr/src/${r8125_dkms_name}-${r8125_version}"
+    if [[ ! -f "$src_dir/dkms.conf" ]]; then
+        echo "[r8125] загружаю исходники r8125 ${r8125_version}"
+        # Фиксированный work_dir с очисткой на входе: при прерванной сборке
+        # (set -e выйдет мимо rm ниже) следующий запуск сам подчистит
+        # осиротевший каталог перед повторной загрузкой — без глобального trap.
+        work_dir="/tmp/r8125-src"
+        rm -rf "$work_dir"
+        mkdir -p "$work_dir"
+        curl -fsSL "$r8125_src_url" -o "$work_dir/r8125.tar.gz"
+        printf '%s  %s\n' "$r8125_src_sha256" "$work_dir/r8125.tar.gz" | sha256sum -c -
+        tar -C "$work_dir" -xzf "$work_dir/r8125.tar.gz"
+        # В архиве один каталог верхнего уровня realtek-r8125-dkms-<tag>.
+        extracted="$(find "$work_dir" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+        [[ -n "$extracted" ]] || { echo "[r8125] ERROR: не найден каталог исходников в архиве" >&2; exit 1; }
+        # Атомарная установка дерева: cp во временный каталог, затем mv. Иначе
+        # прерывание посреди cp могло бы оставить dkms.conf без остального src/,
+        # и re-run пропустил бы перекачку (guard проверяет только dkms.conf).
+        rm -rf "$src_dir" "${src_dir}.tmp"
+        cp -a "$extracted" "${src_dir}.tmp"
+        mv "${src_dir}.tmp" "$src_dir"
+        rm -rf "$work_dir"
+    fi
+
+    # Регистрируем модуль в dkms (идемпотентно).
+    if ! dkms status -m "$r8125_dkms_name" -v "$r8125_version" | grep -q .; then
+        dkms add -m "$r8125_dkms_name" -v "$r8125_version"
+    fi
+
+    # Сборка/установка под каждое целевое ядро + проверка результата.
+    # В chroot uname -r указывает на ядро билдера, поэтому -k обязателен.
+    for kver in "${target_kernels[@]}"; do
+        if [[ ! -e "/lib/modules/$kver/build" ]]; then
+            echo "[r8125] WARNING: нет заголовков для $kver, пропускаю" >&2
+            continue
+        fi
+
+        echo "[r8125] сборка модуля r8125 ${r8125_version} для ядра $kver"
+        # dkms install сам соберёт модуль, если он ещё не собран.
+        if ! dkms status -m "$r8125_dkms_name" -v "$r8125_version" -k "$kver" | grep -q 'installed'; then
+            dkms install -m "$r8125_dkms_name" -v "$r8125_version" -k "$kver" --force
+        fi
+        depmod -a "$kver"
+
+        # -print -quit: без пайпа (иначе pipefail ловит SIGPIPE find'а как ошибку).
+        found_ko="$(find "/lib/modules/$kver" -name 'r8125.ko*' -print -quit)"
+        if [[ -z "$found_ko" ]]; then
+            echo "[r8125] ERROR: модуль r8125 не собрался для ядра $kver" >&2
+            exit 1
+        fi
+        built_count=$((built_count + 1))
+    done
+
+    if [[ "$built_count" -eq 0 ]]; then
+        echo "[r8125] ERROR: r8125 не собран ни для одного ядра (нет заголовков)" >&2
+        exit 1
+    fi
+
+    # ТОЧЕЧНОЕ предпочтение r8125 ТОЛЬКО для устройства RTL8125 (PCI 10ec:8125).
+    #
+    # НЕ блокируем r8169 глобально: на той же плате гигабитная карта Realtek
+    # (RTL8111/8168) обслуживается именно r8169, и blacklist убивал её (1GbE
+    # пропадал). Вместо этого через udev перепривязываем к r8125 только 8125-е
+    # устройство, если его успел захватить r8169. Все остальные Realtek остаются
+    # на r8169.
+    install -D -m 0755 /dev/stdin /usr/local/sbin/inauto-prefer-r8125 <<'EOF_HELPER'
+#!/bin/sh
+# Перепривязка одного PCI-устройства RTL8125 с r8169 на вендорный r8125.
+set -eu
+dev="$1"
+modprobe r8125 2>/dev/null || true
+if [ -e "/sys/bus/pci/devices/$dev/driver" ]; then
+    cur="$(basename "$(readlink "/sys/bus/pci/devices/$dev/driver")")"
+    [ "$cur" = "r8125" ] && exit 0
+    echo "$dev" > "/sys/bus/pci/devices/$dev/driver/unbind" 2>/dev/null || true
+fi
+echo r8125 > "/sys/bus/pci/devices/$dev/driver_override" 2>/dev/null || true
+echo "$dev" > /sys/bus/pci/drivers/r8125/bind 2>/dev/null || true
+EOF_HELPER
+
+    install -d -m 0755 /etc/udev/rules.d
+    cat <<'EOF_UDEV' > /etc/udev/rules.d/70-inauto-r8125.rules
+# RTL8125 (2.5GbE): предпочитаем вендорный r8125, не трогая r8169 для остальных
+# Realtek-карт. Срабатывает, когда r8169 привязался к устройству 10ec:8125.
+ACTION=="bind", SUBSYSTEM=="pci", DRIVER=="r8169", ATTR{vendor}=="0x10ec", ATTR{device}=="0x8125", RUN+="/usr/local/sbin/inauto-prefer-r8125 %k"
+EOF_UDEV
+    chmod 0644 /etc/udev/rules.d/70-inauto-r8125.rules
+
+    echo "[r8125] драйвер ${r8125_version} собран для ядер: ${target_kernels[*]}; r8169 оставлен для прочих Realtek"
+}
+
 # ============================================================================
 # RAUC immutable firmware target.
 # Активируется, когда TARGET_FORMAT=rauc. Для TARGET_FORMAT=iso функции
@@ -1263,6 +1471,18 @@ function install_rauc_update_agent() {
     echo "[rauc] panel-check-updates.timer включён"
 }
 
+# Устанавливает интерактивный помощник ручного обновления из .raucb
+# (диагностика -> проверка bundle/sha256 -> правка EFI -> подтверждение ->
+# rauc install -> reboot). Автоматизирует docs/runbooks/update-from-raucb.md.
+function install_rauc_update_helper() {
+    local src="/root/profile/rauc/scripts/panel-update.sh"
+
+    [[ -f "$src" ]] || { echo "[rauc] ERROR: panel-update.sh отсутствует: $src" >&2; exit 1; }
+
+    install -D -m 0755 "$src" /usr/local/bin/panel-update
+    echo "[rauc] /usr/local/bin/panel-update установлен"
+}
+
 
 # Конфигурирует systemd watchdog для production rollout'ов.
 # Kernel panic timeout уже в kernel cmdline через system.conf.template (panic=30).
@@ -1301,6 +1521,72 @@ function install_rauc_mark_good() {
     echo "[rauc] rauc-mark-boot-good.service включён"
 }
 
+# Mount unit для grubenv: efi_A (FAT32 с GRUB/grub.cfg/grubenv) монтируется
+# в /run/inauto/bootenv. Через него RAUC grub backend (grub-editenv) читает и
+# пишет ORDER/OK/TRY; сам GRUB работает с тем же файлом на ранней загрузке.
+function install_rauc_bootenv_mount() {
+    cat <<'EOF_UNIT' > /etc/systemd/system/run-inauto-bootenv.mount
+[Unit]
+Description=Mount efi_A (GRUB env) for RAUC grub backend
+DefaultDependencies=no
+After=local-fs-pre.target
+Before=umount.target
+Conflicts=umount.target
+
+[Mount]
+What=/dev/disk/by-partlabel/efi_A
+Where=/run/inauto/bootenv
+Type=vfat
+Options=rw,umask=0077
+
+[Install]
+WantedBy=multi-user.target
+EOF_UNIT
+    chmod 0644 /etc/systemd/system/run-inauto-bootenv.mount
+
+    # rauc.service должен видеть grubenv с самого старта.
+    install -d -m 0755 /etc/systemd/system/rauc.service.d
+    cat <<'EOF_DROPIN' > /etc/systemd/system/rauc.service.d/10-inauto-bootenv.conf
+[Unit]
+After=run-inauto-bootenv.mount
+Requires=run-inauto-bootenv.mount
+EOF_DROPIN
+    chmod 0644 /etc/systemd/system/rauc.service.d/10-inauto-bootenv.conf
+
+    systemctl enable run-inauto-bootenv.mount
+    echo "[rauc] run-inauto-bootenv.mount включён (grubenv на efi_A)"
+}
+
+# Boot-артефакты внутри squashfs для единого GRUB (см.
+# docs/2026-07-04-grub-boot-selection-design.md):
+#   /boot/vmlinuz, /boot/initrd.img — стабильные симлинки на новейшее ядро;
+#   /boot/grub-slot.cfg             — сниппет, который source'ит главный
+#                                     grub.cfg с efi_A ($slotdev/$bootname/
+#                                     $rootpart выставляет он же).
+function install_rauc_boot_artifacts() {
+    local kver kernel initrd
+
+    kernel="$(find /boot -maxdepth 1 -name 'vmlinuz-*' -printf '%f\n' | sort -V | tail -n1)"
+    [[ -n "$kernel" ]] || { echo "[rauc] ERROR: в /boot нет vmlinuz-*; ядро должно быть установлено раньше" >&2; exit 1; }
+    kver="${kernel#vmlinuz-}"
+    initrd="initrd.img-$kver"
+    [[ -f "/boot/$initrd" ]] || { echo "[rauc] ERROR: нет /boot/$initrd (initramfs не собрана?)" >&2; exit 1; }
+
+    ln -sf "$kernel" /boot/vmlinuz
+    ln -sf "$initrd" /boot/initrd.img
+
+    # loglevel=3: quiet скрывает только INFO/WARN, а KERN_ERR (например,
+    # косметические ACPI BIOS Error из кривого DSDT панели) всё равно печатается
+    # на консоль. loglevel=3 оставляет на экране только CRIT и хуже; полный лог
+    # по-прежнему в dmesg/journald.
+    cat <<'EOF_SLOT' > /boot/grub-slot.cfg
+linux ${slotdev}/boot/vmlinuz rauc.slot=${bootname} root=PARTLABEL=${rootpart} rootfstype=squashfs ro quiet loglevel=3 panic=30
+initrd ${slotdev}/boot/initrd.img
+EOF_SLOT
+    chmod 0644 /boot/grub-slot.cfg
+    echo "[rauc] /boot/{vmlinuz,initrd.img} -> $kernel/$initrd; grub-slot.cfg записан"
+}
+
 # Полная настройка RAUC target'а. Вызывается из custom_conf().
 # No-op для TARGET_FORMAT=iso.
 function configure_rauc_target() {
@@ -1312,9 +1598,12 @@ function configure_rauc_target() {
     render_rauc_system_conf
     install_rauc_keyring
     install_rauc_initramfs
+    install_rauc_bootenv_mount
+    install_rauc_boot_artifacts
     install_rauc_mark_good
     install_rauc_watchdog
     install_rauc_update_agent
+    install_rauc_update_helper
     write_firmware_version_file
     echo "[rauc] настройка RAUC target'а завершена"
 }

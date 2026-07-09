@@ -14,13 +14,17 @@ TARGET_PLATFORM="${TARGET_PLATFORM:-pc-efi}"
 TARGET_ARCH="${TARGET_ARCH:-amd64}"
 RAUC_VERSION_MODE="${RAUC_VERSION_MODE:-release}"
 RAUC_PINNED_VERSION="${RAUC_PINNED_VERSION:-1.15.2}"
-RAUC_COMPATIBLE_VERSION="${RAUC_COMPATIBLE_VERSION:-v1}"
+# v2 = GRUB-схема выбора слота (см. docs/2026-07-04-grub-boot-selection-design.md);
+# держать в синхроне с дефолтом в scripts/config.sh.
+RAUC_COMPATIBLE_VERSION="${RAUC_COMPATIBLE_VERSION:-v2}"
 DOCKER_RUN_NETWORK="${DOCKER_RUN_NETWORK:-}"
 DOCKER_BUILD_NETWORK="${DOCKER_BUILD_NETWORK:-}"
 LIVECD_APT_CACHE_VOLUME="${LIVECD_APT_CACHE_VOLUME:-$(basename "$REPO_ROOT")-apt-cache-${TARGET_DISTRO}}"
 LIVECD_KEEP_APT_CACHE="${LIVECD_KEEP_APT_CACHE:-1}"
 clean_apt_cache="${CLEAN_APT_CACHE:-0}"
+rebuild_builder="${REBUILD_BUILDER:-0}"
 CLEAN_CACHE_ARGS=()
+REBUILD_BUILDER_ARGS=()
 
 function usage() {
     cat <<'EOF'
@@ -29,12 +33,14 @@ Build the complete RAUC factory installer:
   2. separate factory installer live ISO
 
 Usage:
-  RAUC_BUNDLE_VERSION=<version> ./scripts/build-rauc-installer.sh [--clean-cache]
+  RAUC_BUNDLE_VERSION=<version> ./scripts/build-rauc-installer.sh [--clean-cache] [--rebuild-builder]
 
 Options:
-  --clean-cache  Remove the shared APT package cache before phase 1 only.
-                 Phase 2 reuses the same warmed cache, and later builds reuse it too.
-  -h, --help     Show this help.
+  --clean-cache      Remove the shared APT package cache before phase 1 only.
+                     Phase 2 reuses the same warmed cache, and later builds reuse it too.
+  --rebuild-builder  Rebuild the builder Docker image before phase 1 (needed after
+                     docker/Builder.Dockerfile changes). Phase 2 reuses the rebuilt image.
+  -h, --help         Show this help.
 EOF
 }
 
@@ -42,6 +48,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --clean-cache)
             clean_apt_cache=1
+            shift
+            ;;
+        --rebuild-builder)
+            rebuild_builder=1
             shift
             ;;
         -h|--help)
@@ -67,6 +77,23 @@ case "$clean_apt_cache" in
         ;;
     *)
         >&2 echo "ERROR: CLEAN_APT_CACHE must be one of: 0, 1, true, false, yes, no"
+        exit 1
+        ;;
+esac
+
+case "$rebuild_builder" in
+    1|true|yes)
+        rebuild_builder=1
+        # Пересборка только перед phase 1: обе фазы используют один builder-образ
+        # (livecd-builder-${TARGET_DISTRO}:local), phase 2 берёт уже свежий.
+        REBUILD_BUILDER_ARGS=(--rebuild-builder)
+        ;;
+    0|false|no|"")
+        rebuild_builder=0
+        REBUILD_BUILDER_ARGS=()
+        ;;
+    *)
+        >&2 echo "ERROR: REBUILD_BUILDER must be one of: 0, 1, true, false, yes, no"
         exit 1
         ;;
 esac
@@ -112,7 +139,7 @@ if [[ -n "$DOCKER_BUILD_NETWORK" ]]; then
 fi
 
 echo "=====> phase 1/2: build panel RAUC bundle + installer payload"
-echo "=====> shared APT cache volume: $LIVECD_APT_CACHE_VOLUME (clean before phase 1: $clean_apt_cache)"
+echo "=====> shared APT cache volume: $LIVECD_APT_CACHE_VOLUME (clean before phase 1: $clean_apt_cache, rebuild builder: $rebuild_builder)"
 (
     cd "$REPO_ROOT"
     env \
@@ -121,7 +148,7 @@ echo "=====> shared APT cache volume: $LIVECD_APT_CACHE_VOLUME (clean before pha
         TARGET_FORMAT=rauc \
         INAUTO_IMAGE_ROLE=panel \
         LIVECD_CHROOT_VOLUME="$target_volume" \
-        ./scripts/build-in-docker.sh --clean "${CLEAN_CACHE_ARGS[@]}" -
+        ./scripts/build-in-docker.sh --clean "${CLEAN_CACHE_ARGS[@]}" "${REBUILD_BUILDER_ARGS[@]}" -
 )
 
 echo "=====> phase 2/2: build separate factory installer ISO"

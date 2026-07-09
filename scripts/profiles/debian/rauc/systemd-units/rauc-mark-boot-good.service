@@ -1,12 +1,14 @@
 [Unit]
 Description=Mark current RAUC slot as good after successful boot
-After=multi-user.target network-online.target docker.service lightdm.service MountHome.service
-Requires=MountHome.service docker.service lightdm.service
+After=multi-user.target network-online.target docker.service lightdm.service MountHome.service run-inauto-bootenv.mount
+Requires=MountHome.service docker.service lightdm.service run-inauto-bootenv.mount
 ConditionPathExists=/usr/bin/rauc
 
 [Service]
 Type=oneshot
 ExecStartPre=/usr/local/bin/panel-healthcheck.sh
+# grub backend: mark-good сбрасывает <slot>_TRY=0 в grubenv (efi_A,
+# смонтирован в /run/inauto/bootenv) — слот фиксируется навсегда.
 ExecStart=/usr/bin/rauc status mark-good booted
 RemainAfterExit=yes
 

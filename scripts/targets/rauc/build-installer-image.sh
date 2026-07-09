@@ -1,10 +1,10 @@
 #!/bin/bash
 # Собирает installer-payload для factory provisioning: tar.zst с
-# install-to-disk.sh, backup-restore-home.sh, pc-efi.sgdisk, keyring.pem
-# и подписанным bundle.raucb. Raw boot- и rootfs-образы в payload
-# НЕ кладутся: installer после verify'а подписи монтирует bundle через
-# RAUC и копирует из него efi.vfat + rootfs.img, так что подпись
-# защищает именно те байты, которые физически записываются на диск.
+# install-to-disk.sh, backup-restore-home.sh, pc-efi.sgdisk, keyring.pem,
+# boot.vfat (единый GRUB) и подписанным bundle.raucb. Raw rootfs-образ в
+# payload НЕ кладётся: installer после verify'а подписи монтирует bundle
+# через RAUC и копирует из него rootfs.img, так что подпись защищает
+# именно те байты, которые физически записываются на диск.
 #
 # Полный bootable USB-ISO (Ubuntu live + встроенный payload) — отдельная фаза:
 # после этого stage вручную прошивается обычный Ubuntu Live USB, и payload
@@ -62,13 +62,21 @@ case "${TARGET_PLATFORM}" in
         ;;
 esac
 
-# Единственный источник raw-байт для установки — сам signed bundle.
-# Installer сначала verify'ит подпись через keyring, затем монтирует
-# bundle средствами RAUC и копирует efi.vfat + rootfs.img на целевой
-# панели. Никаких отдельных raw-образов в payload'е не кладём — это
-# устранило бы криптографическую связь между подписью и тем, что реально
-# попадёт на disk.
+# Источник rootfs-байт для установки — сам signed bundle. Installer сначала
+# verify'ит подпись через keyring, затем монтирует bundle средствами RAUC и
+# копирует rootfs.img на целевой панели.
 cp "$BUNDLE_SRC" "$PAYLOAD_DIR/bundle.raucb"
+
+# boot.vfat — образ загрузочного раздела (GRUB standalone + grub.cfg + grubenv);
+# пишется installer'ом в efi_A (+ копия в efi_B). Не входит в bundle: kernel/initrd
+# приезжают внутри squashfs, а GRUB статичен (см. build-boot-grub.sh).
+BOOT_IMG_SRC="$OUT_DIR/boot.vfat"
+if [[ ! -f "$BOOT_IMG_SRC" ]]; then
+    log "boot.vfat не найден в $OUT_DIR — собираю через build-boot-grub.sh"
+    "$RAUC_TARGETS_DIR/build-boot-grub.sh" "$OUT_DIR"
+fi
+[[ -f "$BOOT_IMG_SRC" ]] || fail "boot.vfat не собрался: $BOOT_IMG_SRC"
+install -m 0644 "$BOOT_IMG_SRC" "$PAYLOAD_DIR/boot.vfat"
 
 # Keyring — обязателен: без него installer не сможет verify/mount bundle.
 KEYRING_SRC="${INSTALLER_KEYRING_SRC:-}"

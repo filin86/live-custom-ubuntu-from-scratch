@@ -3,26 +3,29 @@
 #
 # Запускается из USB installer-окружения с правами root. Требует UEFI runtime.
 #
-# Последовательность (согласно спеку, разделу "Factory provisioning"):
+# Последовательность (layout v2 boot-схемы, GPT-раскладка та же):
 #  1. Проверить UEFI runtime и права root.
 #  2. Выбрать target disk (TARGET_DEVICE или auto-detect non-removable >= 32 GiB).
 #  3. Запустить pc-efi.sgdisk для GPT разметки.
-#  4. Raw-write efi.vfat в efi_A и efi_B, rootfs.img в rootfs_A и rootfs_B
-#     (без двух последовательных `rauc install` — при factory provisioning
-#     оба slot-group'а заполняются напрямую).
-#  5. Зарегистрировать UEFI boot entries system0/system1 через efibootmgr.
-#  6. Установить BootOrder=system0,system1.
-#  7. Инициализировать /persist и /home/inauto skeletons, затем (если есть)
+#  4. Raw-write boot.vfat (единый GRUB + grubenv) в efi_A и копию в efi_B,
+#     rootfs.img в rootfs_A и rootfs_B (kernel/initrd/grub-slot.cfg лежат
+#     внутри squashfs — bundle rootfs-only).
+#  5. Удалить устаревшие NVRAM-записи system0/system1 (прошивка сама найдёт
+#     GRUB по fallback-пути \EFI\BOOT\BOOTX64.EFI на efi_A; выбор слота
+#     выполняет GRUB по grubenv, НЕ UEFI BootOrder — прошивка панелей его
+#     переписывает на каждом POST).
+#  6. Инициализировать /persist и /home/inauto skeletons, затем (если есть)
 #     восстановить backup прямо в inauto-data.
-#  8. Reboot.
+#  7. Reboot.
 #
 # Формат payload (рядом со скриптом в /opt/inauto-installer/):
-#   bundle.raucb                     — подписанный RAUC bundle (ЕДИНСТВЕННЫЙ
-#                                       источник raw-байт для efi_A/B и
-#                                       rootfs_A/B: installer verify'ит
+#   bundle.raucb                     — подписанный RAUC bundle (источник
+#                                       rootfs.img: installer verify'ит
 #                                       подпись и через `rauc mount`
-#                                       получает efi.vfat + rootfs.img
-#                                       перед dd).
+#                                       достаёт образ перед dd).
+#   boot.vfat                        — образ загрузочного раздела (GRUB
+#                                       standalone + grub.cfg + grubenv),
+#                                       собран build-boot-grub.sh
 #   keyring.pem                      — RAUC keyring для verify подписи
 #   pc-efi.sgdisk                    — скрипт GPT разметки
 #   install-to-disk.sh               — этот скрипт
@@ -349,6 +352,7 @@ fi
 # --- 3. Payload ------------------------------------------------------------
 
 BUNDLE="$PAYLOAD_DIR/bundle.raucb"
+BOOT_IMG="$PAYLOAD_DIR/boot.vfat"
 KEYRING="$PAYLOAD_DIR/keyring.pem"
 SGDISK_SCRIPT="$PAYLOAD_DIR/pc-efi.sgdisk"
 FIRMWARE_VERSION_FILE="$PAYLOAD_DIR/firmware-version"
@@ -369,7 +373,7 @@ cleanup() {
 
 trap cleanup EXIT
 
-for f in "$BUNDLE" "$KEYRING" "$SGDISK_SCRIPT" "$TARGET_COMPATIBLE_FILE"; do
+for f in "$BUNDLE" "$BOOT_IMG" "$KEYRING" "$SGDISK_SCRIPT" "$TARGET_COMPATIBLE_FILE"; do
     [[ -f "$f" ]] || fail "отсутствует payload artefact: $f"
 done
 
@@ -408,7 +412,7 @@ if [[ "$BUNDLE_COMPATIBLE" != "$EXPECTED_COMPATIBLE" ]]; then
 fi
 log "bundle compatible OK: $BUNDLE_COMPATIBLE"
 
-# Извлекаем payload (efi.vfat + rootfs.img) из signed bundle в tmpdir.
+# Извлекаем payload (rootfs.img) из signed bundle в tmpdir.
 # Для verity bundle `rauc extract` требует exclusive access к файлу bundle'а
 # во время userspace payload-check. Для bundle'а, лежащего на /cdrom live ISO,
 # это ломается. `rauc mount` идёт по install-like пути (loop + verity) и
@@ -428,8 +432,6 @@ extract_bundle_images() {
     [[ -d "$BUNDLE_MOUNT_DIR" ]] \
         || fail "rauc mount не создал ожидаемый mountpoint: $BUNDLE_MOUNT_DIR"
 
-    cp -f "$BUNDLE_MOUNT_DIR/efi.vfat" "$out_dir/efi.vfat" \
-        || fail "не удалось скопировать efi.vfat из mounted bundle"
     cp -f "$BUNDLE_MOUNT_DIR/rootfs.img" "$out_dir/rootfs.img" \
         || fail "не удалось скопировать rootfs.img из mounted bundle"
 
@@ -445,12 +447,8 @@ BUNDLE_EXTRACT_DIR="$(mktemp -d -t inauto-bundle-XXXXXX)"
 log "извлекаю images из signed bundle → $BUNDLE_EXTRACT_DIR"
 extract_bundle_images "$BUNDLE" "$BUNDLE_EXTRACT_DIR"
 
-EFI_IMG="$BUNDLE_EXTRACT_DIR/efi.vfat"
 ROOTFS_IMG="$BUNDLE_EXTRACT_DIR/rootfs.img"
-
-for f in "$EFI_IMG" "$ROOTFS_IMG"; do
-    [[ -f "$f" ]] || fail "bundle не содержит ожидаемого image: $f"
-done
+[[ -f "$ROOTFS_IMG" ]] || fail "bundle не содержит ожидаемого image: $ROOTFS_IMG"
 
 if [[ -f "$FIRMWARE_VERSION_FILE" ]]; then
     FIRMWARE_VERSION="$(tr -d '[:space:]' < "$FIRMWARE_VERSION_FILE")"
@@ -484,11 +482,11 @@ write_image_raw() {
     run dd if="$src" of="$dst" bs="$bs" conv=fsync,notrunc status=progress
 }
 
-log "заливаю efi_A/efi_B из $EFI_IMG"
+log "заливаю efi_A/efi_B из $BOOT_IMG (единый GRUB + grubenv; efi_B — резерв)"
 # После mkfs.vfat в pc-efi.sgdisk на efi_A/efi_B уже лежит пустой FAT32.
-# Raw dd затирает пустой FAT32 нашим образом EFI-stub kernel + initrd.
-write_image_raw "$EFI_IMG"    "$EFI_A_DEV"
-write_image_raw "$EFI_IMG"    "$EFI_B_DEV"
+# Raw dd затирает его образом GRUB standalone + grub.cfg + grubenv.
+write_image_raw "$BOOT_IMG"   "$EFI_A_DEV"
+write_image_raw "$BOOT_IMG"   "$EFI_B_DEV"
 
 log "заливаю rootfs_A/rootfs_B из $ROOTFS_IMG"
 write_image_raw "$ROOTFS_IMG" "$ROOTFS_A_DEV"
@@ -502,6 +500,7 @@ validate_efi_slot() {
     local label="$1"
     local device
     local mnt
+    local f
 
     device="$(require_partition "$label")"
 
@@ -510,20 +509,16 @@ validate_efi_slot() {
     mnt="$(mktemp -d)"
     if ! mount -o ro "$device" "$mnt"; then
         rmdir "$mnt" 2>/dev/null || true
-        fail "не удалось смонтировать $label после записи EFI image"
+        fail "не удалось смонтировать $label после записи boot image"
     fi
 
-    if [[ ! -s "$mnt/EFI/BOOT/BOOTX64.EFI" ]]; then
-        umount "$mnt" 2>/dev/null || true
-        rmdir "$mnt" 2>/dev/null || true
-        fail "$label не содержит EFI loader: \\EFI\\BOOT\\BOOTX64.EFI"
-    fi
-
-    if [[ ! -s "$mnt/EFI/Linux/initrd.img" ]]; then
-        umount "$mnt" 2>/dev/null || true
-        rmdir "$mnt" 2>/dev/null || true
-        fail "$label не содержит initrd: \\EFI\\Linux\\initrd.img"
-    fi
+    for f in "EFI/BOOT/BOOTX64.EFI" "grub.cfg" "grubenv"; do
+        if [[ ! -s "$mnt/$f" ]]; then
+            umount "$mnt" 2>/dev/null || true
+            rmdir "$mnt" 2>/dev/null || true
+            fail "$label не содержит $f (ожидается образ GRUB из build-boot-grub.sh)"
+        fi
+    done
 
     umount "$mnt"
     rmdir "$mnt"
@@ -550,36 +545,12 @@ validate_rootfs_slot rootfs_A
 validate_rootfs_slot rootfs_B
 
 # --- 6. UEFI boot entries --------------------------------------------------
+# Слоты больше НЕ регистрируются в NVRAM: прошивка панелей регенерирует
+# BootOrder на каждом POST, поэтому выбор слота выполняет GRUB по grubenv.
+# Прошивка сама найдёт GRUB по fallback-пути \EFI\BOOT\BOOTX64.EFI на efi_A
+# (partition 1 сортируется первым). Здесь только вычищаем устаревшие записи
+# system0/system1 от предыдущих установок (их LoadOptions мешали бы GRUB).
 
-# Вычисляем номер партиции efi_A/efi_B относительно выбранного диска.
-part_number_for_device() {
-    local part="$1"
-    local label="${2:-}"
-    local part_num
-
-    if is_dry_run; then
-        [[ -n "$label" ]] || return 1
-        partition_number_by_label "$label"
-        return
-    fi
-
-    part_num="$(lsblk -dn -o PARTN "$part" | tr -d '[:space:]' || true)"
-    if [[ -n "$part_num" ]]; then
-        printf '%s\n' "$part_num"
-        return 0
-    fi
-    # /dev/sda3 -> 3; /dev/nvme0n1p3 -> 3; /dev/mmcblk0p3 -> 3
-    part_num="$(echo "$part" | sed -E 's#.*[^0-9]([0-9]+)$#\1#')"
-    [[ "$part_num" =~ ^[0-9]+$ ]] || return 1
-    printf '%s\n' "$part_num"
-}
-
-EFI_A_PART="$(part_number_for_device "$EFI_A_DEV" efi_A)" || fail "не удалось определить partition # для efi_A"
-EFI_B_PART="$(part_number_for_device "$EFI_B_DEV" efi_B)" || fail "не удалось определить partition # для efi_B"
-
-log "регистрирую UEFI boot entries на $TARGET_DEVICE (efi_A=$EFI_A_PART, efi_B=$EFI_B_PART)"
-
-# Удалим прежние system0/system1 если остались (idempotent re-install).
 remove_existing_entry() {
     local label="$1"
     local existing
@@ -589,63 +560,15 @@ remove_existing_entry() {
         return 0
     fi
 
-    existing="$(efibootmgr -v 2>/dev/null | awk -v lbl="$label" '$0 ~ lbl { sub(/^Boot/, "", $1); sub(/\*$/, "", $1); print $1 }' || true)"
+    existing="$(efibootmgr 2>/dev/null | awk -v lbl="$label" '$2 == lbl { sub(/^Boot/, "", $1); sub(/\*$/, "", $1); print $1 }' || true)"
     for bootnum in $existing; do
-        log "удаляю старую запись Boot$bootnum ($label)"
+        log "удаляю устаревшую запись Boot$bootnum ($label)"
         run efibootmgr --bootnum "$bootnum" --delete-bootnum || true
     done
 }
 
 remove_existing_entry "system0"
 remove_existing_entry "system1"
-
-LOADER_PATH='\EFI\BOOT\BOOTX64.EFI'
-# EFI stub должен получить cmdline, с которым kernel может смонтировать
-# squashfs root даже если initramfs не поднялся. PARTLABEL понимается ядром
-# напрямую и совпадает с RAUC system.conf, в отличие от udev symlink'ов
-# /dev/disk/by-partlabel/*.
-CMDLINE_A="initrd=\\EFI\\Linux\\initrd.img rauc.slot=system0 root=PARTLABEL=rootfs_A rootfstype=squashfs ro quiet panic=30"
-CMDLINE_B="initrd=\\EFI\\Linux\\initrd.img rauc.slot=system1 root=PARTLABEL=rootfs_B rootfstype=squashfs ro quiet panic=30"
-
-run efibootmgr \
-    --create \
-    --disk "$TARGET_DEVICE" \
-    --part "$EFI_A_PART" \
-    --label "system0" \
-    --loader "$LOADER_PATH" \
-    --unicode "$CMDLINE_A"
-
-run efibootmgr \
-    --create \
-    --disk "$TARGET_DEVICE" \
-    --part "$EFI_B_PART" \
-    --label "system1" \
-    --loader "$LOADER_PATH" \
-    --unicode "$CMDLINE_B"
-
-# Вытащим bootnum'ы new'ых entries для установки BootOrder.
-get_bootnum() {
-    local label="$1"
-    if is_dry_run; then
-        case "$label" in
-            system0) printf '0000\n' ;;
-            system1) printf '0001\n' ;;
-            *) return 1 ;;
-        esac
-        return
-    fi
-
-    efibootmgr -v 2>/dev/null | awk -v lbl="$label" '$0 ~ lbl { sub(/^Boot/, "", $1); sub(/\*$/, "", $1); print $1; exit }'
-}
-
-BOOTNUM_A="$(get_bootnum system0)"
-BOOTNUM_B="$(get_bootnum system1)"
-
-[[ -n "$BOOTNUM_A" && -n "$BOOTNUM_B" ]] \
-    || fail "не удалось вычислить bootnum'ы после efibootmgr --create."
-
-log "устанавливаю BootOrder=$BOOTNUM_A,$BOOTNUM_B"
-run efibootmgr --bootorder "$BOOTNUM_A,$BOOTNUM_B"
 
 # --- 7. Инициализация persist и inauto-data -------------------------------
 

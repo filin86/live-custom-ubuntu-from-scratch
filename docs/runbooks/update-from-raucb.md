@@ -1,4 +1,4 @@
-# Инструкция: ручное обновление системы из `.raucb`
+# Инструкция: обновление системы из `.raucb`
 
 Применимость: панель уже установлена как неизменяемая RAUC-система, а
 инженеру передали только файл `*.raucb`.
@@ -13,6 +13,78 @@
 - Права root или sudo.
 - Достаточно свободного места в `/tmp` или `/home/inauto` под RAUC-пакет.
 
+## Быстрый способ: скрипт `panel-update`
+
+В образ включён `/usr/local/bin/panel-update`, который автоматизирует всю
+процедуру ниже: проверку контрольной суммы, диагностику текущей системы,
+остановку автообновлений, вывод сводки «текущая → новая», запрос
+подтверждения, `rauc install` и перезагрузку.
+
+1. Передайте на панель `*.raucb` (и рядом лежащий `*.raucb.sha256`) — см. шаг 1.
+2. Запустите:
+
+   ```bash
+   sudo panel-update /tmp/inauto-panel-ubuntu-amd64-pc-efi-<VERSION>.raucb
+   ```
+
+   Без аргумента скрипт сам найдёт единственный `*.raucb` в `/tmp`,
+   `/home/inauto`, `/home/inauto/update` или `/media/*`.
+
+3. Проверьте выведенную сводку и подтвердите установку (`y`). После `rauc install`
+   панель перезагрузится в новый слот; текущий останется точкой отката.
+4. После возврата панели выполните проверку из шага 7.
+
+Скрипт останавливает `panel-check-updates.timer` на время установки и возвращает
+его при отмене или ошибке. Если контрольная сумма не совпала, `rauc info` не смог
+прочитать пакет или `rauc install` упал — установка прерывается, система не
+трогается.
+
+Пошаговая ручная процедура ниже нужна, только если `panel-update` в образе нет
+или требуется ручной контроль над каждым шагом (отладка).
+
+## Миграция со старой EFI-схемы (v1) на GRUB-схему (v2) — без инсталлятора
+
+Прошивка панелей перезаписывает UEFI `BootOrder` на каждом POST, поэтому в
+v2-схеме выбор слота выполняет единый GRUB на `efi_A` по `grubenv`
+(см. `docs/2026-07-04-grub-boot-selection-design.md`). Панель на старой схеме
+(`bootloader=efi` в `/etc/rauc/system.conf`) мигрирует по SSH, заводской
+инсталлятор НЕ нужен:
+
+1. Передайте на панель в `/tmp` релизные артефакты и новый скрипт:
+
+   ```bash
+   scp inauto-panel-ubuntu-amd64-pc-efi-<VERSION>.raucb{,.sha256} \
+       boot.vfat{,.sha256} panel-update.sh ubuntu@<ip_панели>:/tmp/
+   ```
+
+2. Запустите новый скрипт (старый `/usr/local/bin/panel-update` образа v1
+   миграцию не умеет):
+
+   ```bash
+   sudo bash /tmp/panel-update.sh /tmp/inauto-panel-ubuntu-amd64-pc-efi-<VERSION>.raucb
+   ```
+
+   Скрипт сам распознаёт старую схему + v2-bundle и выполняет миграцию:
+   проверка sha256 → `rauc mount` (проверка подписи) → запись rootfs в
+   неактивный слот → запись загрузчика в оба ESP (сначала неактивный) →
+   `grubenv` на новый слот → удаление устаревших NVRAM-записей → перезагрузка.
+
+3. После перезагрузки выполните проверку из шага 7: версия новая,
+   `rauc-mark-boot-good.service` прошёл, в `/etc/rauc/system.conf` —
+   `bootloader=grub`.
+
+**ВНИМАНИЕ:** до установки СЛЕДУЮЩЕГО v2-обновления старый слот незагружаем
+(в нём нет `/boot/grub-slot.cfg`) — отката на старую версию после миграции
+нет. Не выключайте питание панели во время миграции.
+
+Порядок записи ESP минимизирует риск: сначала неактивный, затем активный;
+скрипт валидирует записанный загрузчик до перезагрузки. Остаточный риск —
+потеря питания ровно во время записи АКТИВНОГО ESP: расчёт на то, что
+прошивка возьмёт `\EFI\BOOT\BOOTX64.EFI` со второго ESP (она стабильно
+создаёт записи для обоих). Этот фолбэк на реальном железе отдельно не
+проверялся; восстановление на такой случай — заводской установщик с USB
+(`docs/runbooks/factory-provisioning.md`).
+
 ## 1. Передать RAUC-пакет на панель
 
 С инженерного ноутбука:
@@ -22,7 +94,8 @@ scp inauto-panel-ubuntu-amd64-pc-efi-<VERSION>.raucb \
     ubuntu@<ip_панели>:/tmp/
 ```
 
-Если рядом дали контрольную сумму:
+Контрольная сумма `*.raucb.sha256` генерируется рядом с bundle автоматически
+(при сборке в `build-bundle.sh`). Передайте её вместе с пакетом:
 
 ```bash
 scp inauto-panel-ubuntu-amd64-pc-efi-<VERSION>.raucb.sha256 \
@@ -67,7 +140,7 @@ rauc info "$BUNDLE"
 - версия та, которую нужно поставить;
 - подпись принимается локальной доверенной связкой ключей RAUC.
 
-Если рядом дали `.sha256`:
+Проверьте контрольную сумму (файл `.sha256` идёт в комплекте с bundle):
 
 ```bash
 cd /tmp
@@ -82,55 +155,24 @@ systemctl stop panel-check-updates.timer panel-check-updates.service || true
 
 Это защищает от параллельного `rauc install` со стороны агента обновлений.
 
-## 5. Проверить EFI-записи
+## 5. Проверить grubenv
 
-Сначала убедитесь, что в `/etc/rauc/system.conf` нет неподдерживаемых ключей
-`efi-loader` и `efi-cmdline`. Если они были добавлены вручную при отладке,
-RAUC не сможет выполнить даже `rauc info`:
-
-```bash
-sed -i '/^efi-loader=/d;/^efi-cmdline=/d' /etc/rauc/system.conf
-systemctl restart rauc.service || true
-```
-
-Перед обновлением с версии `2026.04.24.1` обязательно проверьте, что UEFI-записи
-`system0` и `system1` содержат `root=PARTLABEL=...`:
+С v2-схемы выбор слота выполняет GRUB на `efi_A`, UEFI-записи для слотов не
+используются (прошивка панелей переписывает BootOrder на каждом POST —
+см. `docs/2026-07-04-grub-boot-selection-design.md`). Перед установкой
+убедитесь, что раздел загрузчика смонтирован и grubenv читается:
 
 ```bash
-efibootmgr -v | grep -E 'system0|system1'
+systemctl status run-inauto-bootenv.mount --no-pager
+grub-editenv /run/inauto/bootenv/grubenv list
 ```
 
-Если записей нет или в них нет `initrd=... root=... rootfstype=squashfs`,
-`rauc install` сможет выставить BootNext, но ядро нового слота не найдёт rootfs
-и уйдёт в panic. Исправьте EFI-записи до запуска `rauc install`:
+Ожидаемо: `ORDER="system0 system1"` (или наоборот), у загруженного слота
+`_OK=1` и `_TRY=0`. Если mount неактивен:
 
 ```bash
-EFI_A=/dev/disk/by-partlabel/efi_A
-EFI_B=/dev/disk/by-partlabel/efi_B
-DISK="/dev/$(lsblk -no PKNAME "$EFI_A" | head -n1 | tr -d '[:space:]')"
-EFI_A_PART="$(lsblk -dn -o PARTN "$EFI_A" | tr -d '[:space:]')"
-EFI_B_PART="$(lsblk -dn -o PARTN "$EFI_B" | tr -d '[:space:]')"
-
-for bootnum in $(efibootmgr -v | awk '/system0|system1/ { sub(/^Boot/, "", $1); sub(/\*$/, "", $1); print $1 }'); do
-    efibootmgr --bootnum "$bootnum" --delete-bootnum
-done
-
-efibootmgr --create --disk "$DISK" --part "$EFI_A_PART" \
-    --label system0 \
-    --loader '\EFI\BOOT\BOOTX64.EFI' \
-    --unicode 'initrd=\EFI\Linux\initrd.img rauc.slot=system0 root=PARTLABEL=rootfs_A rootfstype=squashfs ro quiet panic=30'
-
-efibootmgr --create --disk "$DISK" --part "$EFI_B_PART" \
-    --label system1 \
-    --loader '\EFI\BOOT\BOOTX64.EFI' \
-    --unicode 'initrd=\EFI\Linux\initrd.img rauc.slot=system1 root=PARTLABEL=rootfs_B rootfstype=squashfs ro quiet panic=30'
-
-efibootmgr -v | grep -E 'system0|system1'
+systemctl start run-inauto-bootenv.mount
 ```
-
-RAUC не принимает `efi-loader`/`efi-cmdline` в `/etc/rauc/system.conf`.
-Для EFI backend он использует `bootname=system0/system1` и переключает уже
-существующие UEFI-записи через BootNext.
 
 ## 6. Установить RAUC-пакет
 
