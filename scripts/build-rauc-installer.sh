@@ -19,7 +19,9 @@ RAUC_PINNED_VERSION="${RAUC_PINNED_VERSION:-1.15.2}"
 RAUC_COMPATIBLE_VERSION="${RAUC_COMPATIBLE_VERSION:-v2}"
 DOCKER_RUN_NETWORK="${DOCKER_RUN_NETWORK:-}"
 DOCKER_BUILD_NETWORK="${DOCKER_BUILD_NETWORK:-}"
-LIVECD_APT_CACHE_VOLUME="${LIVECD_APT_CACHE_VOLUME:-$(basename "$REPO_ROOT")-apt-cache-${TARGET_DISTRO}}"
+# Фиксированное имя (livecd-*, не по basename REPO_ROOT) — общий .deb-кэш для всех
+# worktree/клонов проекта, чтобы не качать пакеты заново в каждом worktree.
+LIVECD_APT_CACHE_VOLUME="${LIVECD_APT_CACHE_VOLUME:-livecd-apt-cache-${TARGET_DISTRO}}"
 LIVECD_KEEP_APT_CACHE="${LIVECD_KEEP_APT_CACHE:-1}"
 clean_apt_cache="${CLEAN_APT_CACHE:-0}"
 rebuild_builder="${REBUILD_BUILDER:-0}"
@@ -36,7 +38,9 @@ Usage:
   RAUC_BUNDLE_VERSION=<version> ./scripts/build-rauc-installer.sh [--clean-cache] [--rebuild-builder]
 
 Options:
-  --clean-cache      Remove the shared APT package cache before phase 1 only.
+  --clean-cache      Remove cache volumes (APT + Trivy) and prune stale project
+                     build volumes (chroot/trivy/apt of other repos/worktrees;
+                     current chroot kept) before phase 1.
                      Phase 2 reuses the same warmed cache, and later builds reuse it too.
   --rebuild-builder  Rebuild the builder Docker image before phase 1 (needed after
                      docker/Builder.Dockerfile changes). Phase 2 reuses the rebuilt image.
@@ -118,6 +122,27 @@ fi
 build_id="${TARGET_DISTRO}-${TARGET_ARCH}-${TARGET_PLATFORM}-${RAUC_BUNDLE_VERSION}"
 target_volume="${LIVECD_TARGET_CHROOT_VOLUME:-livecd-${build_id}-target}"
 installer_volume="${LIVECD_INSTALLER_CHROOT_VOLUME:-livecd-${build_id}-${INSTALLER_PROFILE}-installer}"
+
+# Per-version chroot-тома фаз — одноразовый scratch: имя содержит версию (никогда
+# не переиспользуется, фазы идут с --clean), артефакты уже в out/. Удаляем на
+# выходе, иначе на КАЖДУЮ сборку копится ~7 ГБ (это и был источник переполнения
+# диска сборочного ПК). KEEP_BUILD_VOLUMES=1 — оставить (отладка);
+# DOCKER_USE_SUDO=1 — если docker вызывается через sudo.
+DOCKER_BIN="${DOCKER_BIN:-docker}"
+_docker_cli=("$DOCKER_BIN")
+[[ "${DOCKER_USE_SUDO:-auto}" == "1" ]] && _docker_cli=(sudo "$DOCKER_BIN")
+cleanup_build_volumes() {
+    [[ "${KEEP_BUILD_VOLUMES:-0}" == "1" ]] && return 0
+    local vol
+    for vol in "$target_volume" "$installer_volume"; do
+        if "${_docker_cli[@]}" volume inspect "$vol" >/dev/null 2>&1; then
+            "${_docker_cli[@]}" volume rm -f "$vol" >/dev/null 2>&1 \
+                && echo "=====> removed per-version build volume: $vol" \
+                || echo "WARNING: не удалось удалить том $vol (занят?)" >&2
+        fi
+    done
+}
+trap cleanup_build_volumes EXIT
 
 common_env=(
     "TARGET_DISTRO=$TARGET_DISTRO"

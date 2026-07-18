@@ -8,11 +8,8 @@ RAUC-системой.
 
 - Новая или прошедшая полную очистку панель с UEFI; legacy BIOS не поддерживается.
 - Внутренний накопитель >= 32 GiB: SATA/NVMe/eMMC.
-- Основной вариант: загрузочный ISO-образ установщика
+- Загрузочный ISO-образ установщика
   `out/inauto-panel-installer-<distro>-<arch>-pc-efi-<version>.iso`.
-- Запасной вариант: архив установщика
-  `out/inauto-panel-installer-<distro>-<arch>-pc-efi-<version>.tar.zst`
-  + загрузочная флешка Ubuntu/Debian.
 - Клавиатура и монитор для первичной настройки загрузки UEFI.
 
 ## Подготовка USB
@@ -114,25 +111,17 @@ systemctl list-timers panel-check-updates.timer
 Через 5-10 минут в таблице `panels` на сервере обновлений должна появиться
 отметка о связи от нового серийного номера.
 
-## Запасной вариант: загрузочная флешка + архив установщика
+### Per-site настройки в `staff/`
 
-Использовать только если загрузочный ISO-образ установщика недоступен.
-Подробная инструкция: `docs/runbooks/install-from-installer-tar-zst.md`.
+Кроме `staff/hostname` (пишется мастером), в `/home/inauto/staff/` из скелета
+раскатываются параметры площадки, которые применяются `on_start`-скриптами:
 
-1. Загрузить панель с флешки Ubuntu/Debian в режиме UEFI.
-2. Скопировать `inauto-panel-installer-*.tar.zst` во временную систему.
-3. Распаковать:
-   ```bash
-   sudo mkdir -p /opt
-   sudo tar -I zstd -xf inauto-panel-installer-*.tar.zst -C /opt
-   ```
-4. Запустить мастер:
-   ```bash
-   /opt/inauto-installer/START-INSTALLER.sh
-   ```
-
-Если временная система не содержит нужных пакетов (`rauc`, `gdisk`, `jq`, `zstd`,
-`efibootmgr` и т.п.), мастер предложит установить их через `apt`.
+- `staff/timezone` — часовой пояс (по умолчанию `Europe/Moscow`), применяет
+  `on_start/oneshot/005-time.sh`. Изменить — отредактировать файл (одно имя зоны
+  из `/usr/share/zoneinfo`; примеры городов — в `home-skel/README.md`);
+- `staff/winshare/` — **опциональный** CIFS-automount сетевой папки Windows
+  (шаблоны `winshare.conf.example`, `credentials.example`). Пока не создан
+  реальный `winshare.conf` — не активируется. Детали — в `home-skel/README.md`.
 
 ## Проверочный список
 
@@ -141,6 +130,7 @@ systemctl list-timers panel-check-updates.timer
 - [ ] `/home/inauto/.inautolock` существует; skeleton директорий создан.
 - [ ] `/etc/inauto/firmware-version` = ожидаемая `<VERSION>`.
 - [ ] `/home/inauto/staff/hostname` = ожидаемое имя панели.
+- [ ] `/home/inauto/staff/timezone` = нужный пояс; `date` показывает корректное локальное время.
 - [ ] `/etc/inauto/serial.txt` имеет вид `<hostname>-<uuid>`.
 - [ ] `docker info` работает.
 - [ ] `systemctl is-active lightdm docker containerd x11vnc ssh` все `active`.

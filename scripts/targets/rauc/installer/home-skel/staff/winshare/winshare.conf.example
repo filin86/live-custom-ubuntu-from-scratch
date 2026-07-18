@@ -1,0 +1,24 @@
+# Конфигурация сетевой папки Windows (SMB/CIFS) для автомаунта.
+#
+# Активировать: скопировать этот файл в winshare.conf (без .example) и заполнить.
+#   cp winshare.conf.example winshare.conf
+# Пока winshare.conf нет — монтирование НЕ выполняется (это нормально).
+#
+# Обрабатывается скриптом on_start/oneshot/20-mount-winshare.sh (source этого файла),
+# поэтому синтаксис — обычные bash-переменные, без пробелов вокруг '='.
+
+# Имя или IP Windows-ПК (без слэшей).
+SERVER=WIN-PC
+
+# Имя расшаренной папки (share name), как в \\WIN-PC\SharedFolder.
+SHARE=SharedFolder
+
+# Точка монтирования на панели (эфемерная, создаётся автоматически).
+MOUNTPOINT=/mnt/winshare
+
+# Версия протокола SMB: 3.0 (Win10/11), 3.1.1, 2.1 (Win7/2008R2), 1.0 (старьё).
+SMB_VERSION=3.0
+
+# Гостевой доступ без пароля: GUEST=1 (тогда credentials не нужен).
+# Для доступа с логином/паролем: GUEST=0 и заполнить файл credentials.
+GUEST=0

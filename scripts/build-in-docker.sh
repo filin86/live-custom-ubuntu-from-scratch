@@ -45,9 +45,12 @@ CHOWN_OUTPUTS="${CHOWN_OUTPUTS:-1}"
 HOST_UID="${HOST_UID:-$(id -u)}"
 HOST_GID="${HOST_GID:-$(id -g)}"
 REPO_NAME="$(basename "$REPO_ROOT")"
+# chroot-том — per-worktree (нужна изоляция сборки). apt/trivy — общий кэш проекта
+# с ФИКСИРОВАННЫМ именем (livecd-*), чтобы worktree/клоны делили .deb- и Trivy-кэш
+# и не качали одно и то же заново. Кэш per-distro (apt) — ubuntu/debian не мешают.
 LIVECD_CHROOT_VOLUME="${LIVECD_CHROOT_VOLUME:-${REPO_NAME}-chroot-${TARGET_PROFILE}}"
-TRIVY_CACHE_VOLUME="${TRIVY_CACHE_VOLUME:-${REPO_NAME}-trivy-cache}"
-LIVECD_APT_CACHE_VOLUME="${LIVECD_APT_CACHE_VOLUME:-${REPO_NAME}-apt-cache-${TARGET_DISTRO}}"
+TRIVY_CACHE_VOLUME="${TRIVY_CACHE_VOLUME:-livecd-trivy-cache}"
+LIVECD_APT_CACHE_VOLUME="${LIVECD_APT_CACHE_VOLUME:-livecd-apt-cache-${TARGET_DISTRO}}"
 LIVECD_KEEP_APT_CACHE="${LIVECD_KEEP_APT_CACHE:-1}"
 DOCKER_BUILD_NETWORK="${DOCKER_BUILD_NETWORK:-}"
 DOCKER_RUN_NETWORK="${DOCKER_RUN_NETWORK:-}"
@@ -139,7 +142,9 @@ Environment overrides:
   DOCKERFILE_PATH       Path to docker/Builder.Dockerfile
   REBUILD_BUILDER       Set to 1 to force a builder image rebuild
   CLEAN_BUILD           Set to 1 to remove scripts/chroot, scripts/image, and the chroot volume before building
-  CLEAN_APT_CACHE       Set to 1 to remove the APT cache volume before building
+  CLEAN_APT_CACHE       Set to 1 to remove cache volumes (APT + Trivy) and prune
+                        stale project build volumes (chroot/trivy/apt of other
+                        repos/worktrees; the current chroot is kept) before building
   LIVECD_CHROOT_VOLUME  Named volume used for scripts/chroot
   LIVECD_APT_CACHE_VOLUME
                         Named volume used for cached .deb packages. Set to 'none' to disable.
@@ -176,17 +181,37 @@ function clean_build_state() {
 }
 
 function clean_apt_cache_state() {
-    if [[ -z "$LIVECD_APT_CACHE_VOLUME" || "$LIVECD_APT_CACHE_VOLUME" == "none" ]]; then
-        echo "APT cache volume is disabled; nothing to clean."
-        return 0
-    fi
+    local vol
 
-    echo "Cleaning APT cache volume: $LIVECD_APT_CACHE_VOLUME"
-    if "${DOCKER_CMD[@]}" volume inspect "$LIVECD_APT_CACHE_VOLUME" >/dev/null 2>&1; then
-        "${DOCKER_CMD[@]}" volume rm -f "$LIVECD_APT_CACHE_VOLUME" >/dev/null
-    else
-        echo "APT cache volume does not exist yet: $LIVECD_APT_CACHE_VOLUME"
-    fi
+    # Кэш-тома ТЕКУЩЕГО репо: APT-кэш + Trivy DB (Trivy раньше не чистился ничем).
+    # Оба безопасно пересобираются.
+    for vol in "$LIVECD_APT_CACHE_VOLUME" "$TRIVY_CACHE_VOLUME"; do
+        [[ -z "$vol" || "$vol" == "none" ]] && continue
+        if "${DOCKER_CMD[@]}" volume inspect "$vol" >/dev/null 2>&1; then
+            echo "Removing cache volume: $vol"
+            "${DOCKER_CMD[@]}" volume rm -f "$vol" >/dev/null 2>&1 \
+                || echo "  WARNING: $vol занят — пропущен" >&2
+        fi
+    done
+
+    prune_stale_project_volumes
+}
+
+# Реклеймит осиротевшие пересобираемые build-тома проекта от ДРУГИХ repo/worktree
+# (суффиксы -chroot-/-trivy-cache/-apt-cache-), КРОМЕ chroot текущей сборки —
+# иначе clean-cache форсил бы полный re-debootstrap (это задача --clean).
+# Занятые контейнером тома docker не удалит — они молча пропускаются.
+function prune_stale_project_volumes() {
+    local vol removed=0
+    while IFS= read -r vol; do
+        [[ -z "$vol" || "$vol" == "$LIVECD_CHROOT_VOLUME" ]] && continue
+        if "${DOCKER_CMD[@]}" volume rm "$vol" >/dev/null 2>&1; then
+            echo "  removed stale volume: $vol"
+            removed=$((removed + 1))
+        fi
+    done < <("${DOCKER_CMD[@]}" volume ls -q 2>/dev/null \
+        | grep -E -- '-chroot-|-trivy-cache|-apt-cache-' || true)
+    echo "Stale project volumes reclaimed: $removed"
 }
 
 OPEN_SHELL=0

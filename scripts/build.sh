@@ -485,6 +485,12 @@ function prechroot() {
     as_root install -m 0755 "$SCRIPT_DIR/targets/rauc/install-rauc-source.sh" \
         chroot/root/install-rauc-source.sh
 
+    # Вендорные драйверы (напр. Moxa mxu11x0) для сборки в chroot — если есть в
+    # дереве. config.sh::install_moxa_uport_driver() читает их из /root/drivers.
+    if [[ -d "$SCRIPT_DIR/targets/rauc/drivers" ]]; then
+        as_root cp -a "$SCRIPT_DIR/targets/rauc/drivers" chroot/root/drivers
+    fi
+
     # Keep DNS inside the chroot aligned with the builder container. This is
     # especially important when Docker uses host networking or custom DNS.
     if [[ -f /etc/resolv.conf ]]; then
@@ -616,6 +622,7 @@ function postchroot() {
         as_root rm -f chroot/root/config.sh
     fi
     as_root rm -rf chroot/root/profile
+    as_root rm -rf chroot/root/drivers
     as_root rm -f chroot/root/rauc-keyring.pem
 
     chroot_exit_teardown
@@ -728,7 +735,7 @@ function build_rauc_bundle() {
         "$SCRIPT_DIR/targets/rauc/build-bundle.sh"
 }
 
-# Собирает installer payload (tar.zst) для TARGET_FORMAT=rauc.
+# Собирает installer payload (директория) для TARGET_FORMAT=rauc.
 # No-op при TARGET_FORMAT=iso. Запускается сразу после build_rauc_bundle —
 # это позволяет одной командой `./scripts/build-in-docker.sh -` получить
 # оба артефакта без heredoc'ов через --shell, что недоступно в non-TTY CI.
@@ -764,16 +771,16 @@ function build_rauc_installer_iso() {
 
     local artifact_base
     local out_dir
-    local payload_tar
+    local payload_dir
     local installer_iso
 
     artifact_base="inauto-panel-installer-${TARGET_DISTRO}-${TARGET_ARCH}-${TARGET_PLATFORM}-${RAUC_BUNDLE_VERSION}"
     out_dir="$(dirname "$SCRIPT_DIR")/out"
-    payload_tar="$out_dir/${artifact_base}.tar.zst"
+    payload_dir="$out_dir/${artifact_base}"
     installer_iso="$out_dir/${artifact_base}.iso"
 
-    [[ -f "$payload_tar" ]] || {
-        >&2 echo "ERROR: installer payload not found: $payload_tar"
+    [[ -d "$payload_dir" ]] || {
+        >&2 echo "ERROR: installer payload not found: $payload_dir"
         return 1
     }
     [[ -d "$SCRIPT_DIR/image" ]] || {
@@ -782,7 +789,7 @@ function build_rauc_installer_iso() {
     }
 
     as_root rm -rf "$SCRIPT_DIR/image/inauto-installer"
-    as_root tar -I zstd -xf "$payload_tar" -C "$SCRIPT_DIR/image"
+    as_root cp -a "$payload_dir" "$SCRIPT_DIR/image/inauto-installer"
     as_root tee "$SCRIPT_DIR/image/inauto-installer/Inauto Panel Installer.desktop" >/dev/null <<'EOF_INSTALLER_DESKTOP'
 [Desktop Entry]
 Type=Application

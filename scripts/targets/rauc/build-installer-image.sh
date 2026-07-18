@@ -1,17 +1,16 @@
 #!/bin/bash
-# Собирает installer-payload для factory provisioning: tar.zst с
+# Собирает installer-payload для factory provisioning: директория с
 # install-to-disk.sh, backup-restore-home.sh, pc-efi.sgdisk, keyring.pem,
 # boot.vfat (единый GRUB) и подписанным bundle.raucb. Raw rootfs-образ в
 # payload НЕ кладётся: installer после verify'а подписи монтирует bundle
 # через RAUC и копирует из него rootfs.img, так что подпись защищает
 # именно те байты, которые физически записываются на диск.
 #
-# Полный bootable USB-ISO (Ubuntu live + встроенный payload) — отдельная фаза:
-# после этого stage вручную прошивается обычный Ubuntu Live USB, и payload
-# разворачивается в /opt/inauto-installer/ оператором.
+# Полный bootable USB-ISO (Ubuntu live + встроенный payload) — отдельная фаза
+# (build.sh::build_rauc_installer_iso), которая берёт payload прямо из out/.
 #
-# Файл payload:
-#   out/inauto-panel-installer-<distro>-<arch>-<platform>-<version>.tar.zst
+# Каталог payload:
+#   out/inauto-panel-installer-<distro>-<arch>-<platform>-<version>/
 #
 # Управляющие env-переменные:
 #   OUT_DIR                     выход (по умолчанию $REPO_ROOT/out)
@@ -28,7 +27,7 @@ load_distro_profile
 require_rauc_vars
 validate_rauc_version "${RAUC_VERSION_MODE:-release}"
 
-for tool in tar zstd sha256sum rauc; do
+for tool in rauc; do
     command -v "$tool" >/dev/null 2>&1 || fail "не найден инструмент '$tool'."
 done
 
@@ -50,6 +49,7 @@ case "${TARGET_PLATFORM}" in
         SGDISK_SRC="$RAUC_TARGETS_DIR/partition-layout/pc-efi.sgdisk"
         INSTALLER_SRC="$RAUC_TARGETS_DIR/installer/install-to-disk.sh"
         BACKUP_SRC="$RAUC_TARGETS_DIR/installer/backup-restore-home.sh"
+        NORMALIZE_SRC="$RAUC_TARGETS_DIR/installer/normalize-home-perms.sh"
         GUI_SRC="$RAUC_TARGETS_DIR/installer/install-gui.sh"
         START_SRC="$RAUC_TARGETS_DIR/installer/START-INSTALLER.sh"
         DESKTOP_SRC="$RAUC_TARGETS_DIR/installer/Inauto Panel Installer.desktop"
@@ -99,9 +99,30 @@ install -m 0644 "$KEYRING_SRC" "$PAYLOAD_DIR/keyring.pem"
 install -m 0755 "$INSTALLER_SRC" "$PAYLOAD_DIR/install-to-disk.sh"
 install -m 0755 "$SGDISK_SRC"    "$PAYLOAD_DIR/pc-efi.sgdisk"
 install -m 0755 "$BACKUP_SRC"    "$PAYLOAD_DIR/backup-restore-home.sh"
+install -m 0755 "$NORMALIZE_SRC" "$PAYLOAD_DIR/normalize-home-perms.sh"
 install -m 0755 "$GUI_SRC"       "$PAYLOAD_DIR/install-gui.sh"
 install -m 0755 "$START_SRC"     "$PAYLOAD_DIR/START-INSTALLER.sh"
 install -m 0755 "$DESKTOP_SRC"   "$PAYLOAD_DIR/Inauto Panel Installer.desktop"
+
+# home-skel — дефолтное наполнение /home/inauto при первой установке.
+# Каталог опционален: если он пуст (только README.md/.gitkeep), в payload
+# ничего не кладём и installer просто пропускает засев. README.md и .gitkeep
+# служебные — на панель не копируются.
+HOME_SKEL_SRC="$RAUC_TARGETS_DIR/installer/home-skel"
+if [[ -d "$HOME_SKEL_SRC" ]]; then
+    HOME_SKEL_DST="$PAYLOAD_DIR/home-skel"
+    cp -a "$HOME_SKEL_SRC" "$HOME_SKEL_DST"
+    find "$HOME_SKEL_DST" -name '.gitkeep' -delete
+    rm -f "$HOME_SKEL_DST/README.md"
+    # Если после вычистки остались только пустые каталоги — засевать нечего,
+    # убираем home-skel из payload, чтобы installer не создавал пустышку.
+    if [[ -z "$(find "$HOME_SKEL_DST" -type f -print -quit)" ]]; then
+        rm -rf "$HOME_SKEL_DST"
+        log "home-skel пуст — в payload не включается"
+    else
+        log "home-skel включён в payload ($(find "$HOME_SKEL_DST" -type f | wc -l) файл(ов))"
+    fi
+fi
 
 # Firmware version marker.
 printf '%s\n' "$RAUC_BUNDLE_VERSION" > "$PAYLOAD_DIR/firmware-version"
@@ -115,15 +136,9 @@ Inauto panel immutable firmware installer payload.
   Прошить operator-панель (UEFI PC) immutable firmware'ом.
 
 Как использовать:
-  1. Загрузите панель с любого Ubuntu/Debian Live USB (UEFI).
-  2. Скопируйте этот payload на live-систему и распакуйте:
-       mkdir -p /opt/inauto-installer
-       tar -I zstd -xf <payload>.tar.zst -C /opt
-  3. Запустите мастер установки:
-       /opt/inauto-installer/START-INSTALLER.sh
-
-  Если live-система позволяет запускать .desktop файлы, можно открыть:
-       /opt/inauto-installer/Inauto Panel Installer.desktop
+  Payload встроен в загрузочный installer-ISO. Загрузите панель с этого ISO
+  (UEFI) — мастер установки запускается автоматически (ярлык на рабочем столе
+  "Inauto Panel Installer" -> /opt/inauto-installer/START-INSTALLER.sh).
 
 Что делает мастер:
   - проверяет UEFI mode;
@@ -155,6 +170,14 @@ Inauto panel immutable firmware installer payload.
   на внешний USB. Если BACKUP_DIR был в /tmp, то после reboot tarball
   исчезнет вместе с tmpfs; восстановленные данные останутся в /home/inauto.
 
+Дефолтное наполнение /home/inauto (home-skel):
+  Каталог home-skel/ в payload (если есть) засевается в /home/inauto ТОЛЬКО
+  при первой установке: после создания skeleton'а, но ДО restore backup'а —
+  так пользовательские данные при миграции перетирают дефолты. Скрипты в
+  on_start/*/ и on_login/ должны быть закоммичены исполняемыми (chmod +x),
+  иначе не запустятся. Последующие RAUC-обновления firmware эти файлы не
+  трогают. Наполнение задаётся в scripts/targets/rauc/installer/home-skel/.
+
 Аварийный ручной режим:
   sudo TARGET_DEVICE=/dev/sda /opt/inauto-installer/install-to-disk.sh
 
@@ -162,16 +185,16 @@ Inauto panel immutable firmware installer payload.
   sudo FORCE_YES=1 TARGET_DEVICE=/dev/sda /opt/inauto-installer/install-to-disk.sh
 EOF_README
 
-# --- Упаковка -------------------------------------------------------------
+# --- Публикация payload директорией (без tar.zst) -------------------------
+# ISO-сборка (build.sh::build_rauc_installer_iso) берёт payload отсюда напрямую;
+# hand-off фаза1->фаза2 идёт через общий out/. Раньше здесь собирался tar.zst —
+# самостоятельный метод установки «распаковать в /opt» удалён (не использовался).
 
 ARTIFACT_BASE="inauto-panel-installer-${TARGET_DISTRO}-${TARGET_ARCH}-${TARGET_PLATFORM}-${RAUC_BUNDLE_VERSION}"
-ARTIFACT="$OUT_DIR/${ARTIFACT_BASE}.tar.zst"
+DEST_DIR="$OUT_DIR/${ARTIFACT_BASE}"
 
-log "упаковываю payload в $ARTIFACT"
-rm -f "$ARTIFACT"
-tar -C "$WORK_DIR" -cf - inauto-installer | zstd -T0 -19 -o "$ARTIFACT"
+log "публикую payload в $DEST_DIR"
+rm -rf "$DEST_DIR"
+cp -a "$PAYLOAD_DIR" "$DEST_DIR"
 
-log "считаю sha256"
-(cd "$OUT_DIR" && sha256sum "${ARTIFACT_BASE}.tar.zst" > "${ARTIFACT_BASE}.tar.zst.sha256")
-
-log "готово: $ARTIFACT"
+log "готово: $DEST_DIR"

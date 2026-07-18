@@ -26,7 +26,7 @@
 3. Ключ подписи хранится в переменной GitLab CI/CD `RAUC_SIGNING_KEY`
    (тип File, Protected), **не root CA** (root CA хранится вне сети).
 4. Артефакт: `out/inauto-panel-<distro>-amd64-pc-efi-<version>.raucb` +
-   `.sha256` + `.tar.zst`-архив установщика.
+   `.sha256`.
 
 ## Шаг 2. Загрузка в candidate
 
@@ -144,9 +144,6 @@ journald) и регулярно копировать sqlite в снимок S3.
 
 - Если передали только `*.raucb` для уже установленной RAUC-панели:
   `docs/runbooks/update-from-raucb.md`.
-- Если передали архив установщика `*.tar.zst` и нужно установить или
-  переустановить панель через загрузочную флешку Ubuntu/Debian:
-  `docs/runbooks/install-from-installer-tar-zst.md`.
 
 ## Контрольный список перед переводом в stable
 

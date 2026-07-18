@@ -30,6 +30,8 @@
 #   pc-efi.sgdisk                    — скрипт GPT разметки
 #   install-to-disk.sh               — этот скрипт
 #   backup-restore-home.sh           — helper для миграции /home/inauto
+#   home-skel/                       — (опц.) дефолтное наполнение /home/inauto,
+#                                       засевается при первой установке
 #   firmware-version                 — текстовая версия из bundle'а
 #
 # Управляющие env-переменные:
@@ -182,7 +184,7 @@ collect_panel_settings() {
 [[ -d /sys/firmware/efi ]] \
     || fail "не UEFI runtime: /sys/firmware/efi отсутствует (pc-efi поддерживается только на UEFI PC)."
 
-for tool in sgdisk blockdev partprobe udevadm efibootmgr dd lsblk jq findmnt mkfs.ext4 mkfs.vfat ssh-keygen uuidgen mountpoint rauc unsquashfs blkid mount umount; do
+for tool in sgdisk blockdev partprobe udevadm efibootmgr dd lsblk jq findmnt mkfs.ext4 mkfs.vfat ssh-keygen uuidgen mountpoint rauc unsquashfs blkid mount umount readelf; do
     command -v "$tool" >/dev/null 2>&1 || fail "не найден инструмент '$tool'."
 done
 
@@ -318,6 +320,13 @@ require_partition() {
 # tarball живёт в BACKUP_DIR (по умолчанию tmpfs /tmp).
 
 BACKUP_SCRIPT="$PAYLOAD_DIR/backup-restore-home.sh"
+NORMALIZE_SCRIPT="$PAYLOAD_DIR/normalize-home-perms.sh"
+
+# Панельный ubuntu. Числом, а не именем: installer-ISO — чужое окружение, где
+# имя 'ubuntu' может резолвиться в другой uid, чем на панели. Значения должны
+# совпадать с дефолтами normalize-home-perms.sh.
+PANEL_UID="${PANEL_UID:-1000}"
+PANEL_GID="${PANEL_GID:-1000}"
 BACKUP_DIR="${BACKUP_DIR:-/tmp/inauto-backup}"
 export BACKUP_DIR
 
@@ -363,11 +372,29 @@ RAUC_DATA_DIR="$(mktemp -d -t inauto-rauc-state-XXXXXX)"
 BUNDLE_EXTRACT_DIR=""
 RAUC_MOUNT_PREFIX=""
 BUNDLE_MOUNT_DIR=""
+PERSIST_MNT=""
+INAUTO_MNT=""
 
 cleanup() {
+    local mnt
+
     if [[ -n "$BUNDLE_MOUNT_DIR" ]] && mountpoint -q "$BUNDLE_MOUNT_DIR"; then
         umount "$BUNDLE_MOUNT_DIR" 2>/dev/null || true
     fi
+
+    # Разделы панели монтируются и размонтируются явно, но между mount и umount
+    # набралось достаточно шагов (skeleton, засев home-skel, restore backup,
+    # нормализация прав), чтобы set -e мог выбросить нас из середины окна. Без
+    # этой уборки раздел остаётся примонтированным, и повторный запуск
+    # installer'а на том же диске упирается в "device busy".
+    for mnt in "$INAUTO_MNT" "$PERSIST_MNT"; do
+        [[ -n "$mnt" ]] || continue
+        if mountpoint -q "$mnt"; then
+            umount "$mnt" 2>/dev/null || true
+        fi
+        rmdir "$mnt" 2>/dev/null || true
+    done
+
     rm -rf "$BUNDLE_EXTRACT_DIR" "$RAUC_MOUNT_PREFIX" "$RAUC_INSTALLER_CONF" "$BUNDLE_INFO_FILE" "$RAUC_DATA_DIR"
 }
 
@@ -662,6 +689,19 @@ else
 
     [[ -e "$INAUTO_MNT/.inautolock" ]] || : > "$INAUTO_MNT/.inautolock"
 
+    # --- 7.4. Засев дефолтного наполнения /home/inauto -----------------------
+    # home-skel (если есть в payload) раскатывается поверх свежего skeleton'а,
+    # но ДО restore backup'а — так восстановленные пользовательские файлы
+    # перетирают дефолты (данные пользователя побеждают). Каталог опционален:
+    # старый payload без home-skel просто пропускает этот шаг.
+    HOME_SKEL_DIR="$PAYLOAD_DIR/home-skel"
+    if [[ -d "$HOME_SKEL_DIR" && -n "$(ls -A "$HOME_SKEL_DIR" 2>/dev/null)" ]]; then
+        log "засев дефолтов /home/inauto из $HOME_SKEL_DIR"
+        cp -a "$HOME_SKEL_DIR/." "$INAUTO_MNT/"
+    else
+        log "home-skel в payload отсутствует — засев дефолтов пропущен"
+    fi
+
     # --- 7.5. Restore backup прямо в /home/inauto ----------------------------
     # Архив (если есть) накатывается поверх свежего skeleton'а inauto-data.
     # staff/docker в tarball не попадает: loopback ext4 runtime-store нам
@@ -675,8 +715,23 @@ else
             || warn "restore не выполнен; backup остаётся в $BACKUP_DIR до reboot'а"
     fi
 
+    # --- 7.6. Нормализация прав и владельца ---------------------------------
+    # Строго после засева И restore: оба источника несут чужие права. home-skel
+    # приезжает из репозитория с uid сборщика (1000) и umask 002, а вендорский
+    # payload (hasplm/MVS/IDMVS) распакован из архива, не хранящего unix-права,
+    # т.е. .sh и бинарники лежат как 0644. Без этого шага postinst hasplm
+    # симлинкает /usr/sbin/aksusbd_x86_64 на неисполняемый файл -> 203/EXEC.
+    [[ -x "$NORMALIZE_SCRIPT" ]] \
+        || fail "не найден $NORMALIZE_SCRIPT — payload собран неполно."
+    run env PANEL_UID="$PANEL_UID" PANEL_GID="$PANEL_GID" \
+        bash "$NORMALIZE_SCRIPT" "$INAUTO_MNT"
+
+    # hostname пишется после нормализации, поэтому владельца ему выставляем
+    # здесь — теми же PANEL_UID/PANEL_GID, иначе внутри staff/ оказались бы
+    # разные владельцы, стоит оператору переопределить переменные.
     printf '%s\n' "$PANEL_HOSTNAME" > "$INAUTO_MNT/staff/hostname"
     chmod 0644 "$INAUTO_MNT/staff/hostname"
+    chown "$PANEL_UID:$PANEL_GID" "$INAUTO_MNT/staff/hostname"
     log "записан /home/inauto/staff/hostname = $PANEL_HOSTNAME"
 fi
 

@@ -105,6 +105,13 @@ function setup_host() {
     echo "$TARGET_NAME" > /etc/hostname
 
     apt-get update
+    # Апгрейд базы debootstrap до последних версий (вкл. -security/-updates) —
+    # иначе базовые пакеты застревают на версиях момента debootstrap. sources.list
+    # уже содержит -security/-updates, пинов нет, так что получаем актуальные.
+    DEBIAN_FRONTEND=noninteractive apt-get -y \
+        -o Dpkg::Options::=--force-confold \
+        -o Dpkg::Options::=--force-confdef \
+        dist-upgrade
     apt-get install -y libterm-readline-gnu-perl systemd-sysv dbus-bin
 
     dbus-uuidgen > /etc/machine-id

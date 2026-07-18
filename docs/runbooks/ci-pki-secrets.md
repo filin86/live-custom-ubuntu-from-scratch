@@ -10,7 +10,7 @@
 | `RAUC_SIGNING_CERT` | **File** | yes | — | `rauc bundle --cert` (путь к файлу) | 3-5 лет, по умолчанию 5 лет |
 | `RAUC_SIGNING_KEY` | **File** | yes | — | `rauc bundle --key` (путь к файлу) | 3-5 лет, по умолчанию 5 лет |
 | `RAUC_INTERMEDIATE_CERT` | **File** (опционально) | yes | — | `rauc bundle --intermediate` | вместе с сертификатом подписи |
-| `RAUC_KEYRING` | **File** | yes | — | PEM (`prod-keyring.pem`) → rootfs `/etc/rauc/keyring.pem` и архив установщика | раз в 20 лет (ротация root CA) |
+| `RAUC_KEYRING` | **File** | yes | — | PEM (`prod-keyring.pem`) → rootfs `/etc/rauc/keyring.pem` и installer payload | раз в 20 лет (ротация root CA) |
 | `UPDATE_SERVER_DEPLOY_TOKEN` | Variable | yes | **yes** | `curl -H "Authorization: Bearer ..."` к `/api/upload` | при компрометации или раз в 6-12 мес |
 | `UPDATE_SERVER_URL` | Variable | yes | no | базовый URL для загрузки | при смене инфраструктуры |
 
@@ -127,7 +127,6 @@ GitLab CI автоматически маскирует masked variables (тип
 `.gitlab-ci.yml::build-bundle.artifacts.paths` включает только:
 
 - `out/inauto-panel-*.raucb` + `.sha256`
-- `out/inauto-panel-installer-*.tar.zst` + `.sha256`
 
 Artifacts НЕ могут содержать temp-каталоги с signing-файлами — GitLab File-type
 variables живут в `/builds/.../tmp/…`, что находится за `$CI_PROJECT_DIR` и в
@@ -209,7 +208,7 @@ root CA в CI не живёт.
       Protected tags`) — иначе Protected variables недоступны pipeline'у.
 - [ ] Job не делает `cat/echo` ключей, `set -x` не включён в шагах со
       signing.
-- [ ] `artifacts.paths` включает только `out/*.raucb` и `out/*.tar.zst`.
+- [ ] `artifacts.paths` включает только `out/*.raucb`.
 - [ ] Build финиширует `out/*.raucb` валидно (`rauc info --keyring=pki/dev-keyring.pem`
       в dev, prod-keyring в prod).
 - [ ] Upload к update-server'у через `Authorization: Bearer

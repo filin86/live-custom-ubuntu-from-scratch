@@ -317,9 +317,12 @@ netplan apply
 nmcli device status
 ```
 
-После этого поправить исходные yaml, которые копируются при запуске, например
-из `/home/inauto/staff/lxqt/netplan/`: в каждом файле должен быть
-`renderer: NetworkManager`.
+После этого поправить исходные yaml, которые копируются при запуске
+скриптом `on_start/network_pre/10-config-network.sh` из
+`/home/inauto/staff/netplan/`: в каждом файле должен быть
+`renderer: NetworkManager`. На нормальной загрузке этот скрипт выполняет
+`netplan generate` **до** старта NetworkManager (без `apply` — NM подхватит
+конфиг сам), поэтому правьте именно исходные yaml в `staff/netplan/`.
 
 ## 9. Overlay переполнился
 
@@ -342,6 +345,52 @@ tmpfs overlay upper имеет размер `INAUTO_OVERLAY_SIZE=2G` по умо
    исчезает).
 3. Долгосрочно: переадресовать большие логи в persistent journal
    (`INAUTO_JOURNAL_DIR=/home/inauto/log/journal`) или в `/home/inauto`.
+
+## 10. Автологин не срабатывает — вместо сессии показывается greeter
+
+### Симптомы
+- После загрузки виден экран входа LightDM (greeter) вместо автоматически
+  запущенной XFCE-сессии `ubuntu`.
+
+### Важно
+Появление greeter НЕ значит, что графика сломана. LightDM автологинит только
+один раз при старте сидения; если автологин-сессия сразу упала, он откатывается
+к greeter. То есть чаще это **упавшая сессия**, а не «автологин не запустился».
+
+### Диагностика
+
+```bash
+# Отработал ли автологин и когда упала сессия
+grep -iE "autologin|Running command|Exited|greeter" /var/log/lightdm/lightdm.log
+#   'Started with service lightdm-autologin' + 'Exited with return value 1'
+#   вскоре после старта -> сессия падает, greeter — это откат.
+
+# Причина падения сессии
+tail -40 /home/ubuntu/.xsession-errors      # ищем 'Cannot open display :0'
+
+# Состояние X-cookie
+XAUTHORITY=/home/ubuntu/.Xauthority xauth list
+#   ДОЛЖЕН быть один cookie под текущим hostname. Несколько cookie от разных
+#   hostname (в т.ч. сборочного) -> см. причины ниже.
+```
+
+### Причина A: протухший `.Xauthority` из kiosk-скелета
+`before_login/10-kiosk.sh` раскатывает `staff/kiosk/` в `/home/ubuntu`. Если в
+скелет попал `.Xauthority` (runtime-состояние X, привязанное к хосту/дисплею),
+он перетирает cookie и сессия не может открыть `:0`.
+
+Фикс: `.Xauthority`/`.ICEauthority` не должны лежать в `staff/kiosk/`; `10-kiosk.sh`
+копирует через `rsync --exclude`. На уже установленной панели удалить
+`/home/inauto/staff/kiosk/.Xauthority`.
+
+### Причина B: hostname меняется под живой X-сессией
+Если hostname задаётся **после** старта LightDM, X-клиенты теряют авторизацию
+`:0` (cookie записан под старым именем) — первая автологин-сессия падает, вторая
+(с уже стабильным именем) работает. Признак: в `xauth list` два cookie под
+разными hostname за одну загрузку.
+
+Фикс: hostname задаётся в `network_pre/50-sethostname.sh` — **до** NetworkManager
+и до X. Проверить, что нет другого места, меняющего hostname позже (в `oneshot`).
 
 ## Диагностический snapshot
 

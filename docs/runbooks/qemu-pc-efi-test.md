@@ -19,7 +19,6 @@
 
 Payload:
 - `out/inauto-panel-ubuntu-amd64-pc-efi-<version>.raucb`
-- `out/inauto-panel-installer-ubuntu-amd64-pc-efi-<version>.tar.zst`
 - `out/inauto-panel-installer-ubuntu-amd64-pc-efi-<version>.iso`
 
 Соберите их:
@@ -134,7 +133,7 @@ umount /mnt/persist
 ```bash
 mkdir -p /mnt/inauto && mount /dev/disk/by-partlabel/inauto-data /mnt/inauto
 ls -l /mnt/inauto/
-# .inautolock + on_start/{before_login,oneshot,forking}/ + on_login/ + staff/ + log/
+# .inautolock + on_start/{before_login,network_pre,oneshot,forking}/ + on_login/ + staff/ + log/
 umount /mnt/inauto
 ```
 

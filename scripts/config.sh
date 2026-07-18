@@ -142,6 +142,7 @@ function custom_conf() {
 
     service_mounthome
     service_onstartbeforelogin
+    service_onstartnetworkpre
     service_onstartoneshot
     service_onstartforking
     configure_docker
@@ -155,6 +156,7 @@ function custom_conf() {
     systemctl enable \
         MountHome.service \
         OnStartBeforeLogin.service \
+        OnStartNetworkPre.service \
         OnStartOneShot.service \
         OnStartForking.service \
         DockerPersistentStorage.service \
@@ -283,18 +285,31 @@ EOF_SND
 function exec_files_in_folder() {
     cat <<EOF_SCRIPT > "$ETCPATH/$EXECFILESINFOLDER"
 #!/bin/bash
-set -euo pipefail
+# Сознательно без 'set -e': падение одного site-скрипта НЕ должно отменять
+# остальные (они независимы — время, сеть, шара, ключ HASP). Ошибка логируется
+# и попадает в exit-код раннера, но фаза доводится до конца.
+set -uo pipefail
 
 TARGET_DIR="$HOMEPATH/\$1"
 if [[ ! -d "\$TARGET_DIR" ]]; then
     exit 0
 fi
 
-find "\$TARGET_DIR" -maxdepth 1 -type f -name '*.sh' -executable | sort | while read -r script; do
+# Process substitution, а не 'find | while': пайп уводит тело цикла в subshell,
+# и накопленный \$rc потерялся бы при выходе из него.
+rc=0
+while IFS= read -r script; do
     echo "start executing \"\$script\""
-    timeout 300 "\$script"
-    echo "executing \"\$script\" is complete"
-done
+    if timeout 300 "\$script"; then
+        echo "executing \"\$script\" is complete"
+    else
+        status=\$?
+        rc=1
+        echo "ERROR: \"\$script\" завершился с кодом \$status — продолжаю" >&2
+    fi
+done < <(find "\$TARGET_DIR" -maxdepth 1 -type f -name '*.sh' -executable | sort)
+
+exit "\$rc"
 EOF_SCRIPT
 
     chmod 755 "$ETCPATH/$EXECFILESINFOLDER"
@@ -351,12 +366,14 @@ function customize_image() {
         pciutils \
         usbutils \
         rsync \
+        cifs-utils \
         ufw \
         x11vnc \
         dbus-x11 \
         e2fsprogs
 
     install_r8125_driver
+    install_moxa_uport_driver
 
     install_docker_engine
 
@@ -1013,11 +1030,45 @@ EOF_UNIT
     chmod 644 /etc/systemd/system/OnStartBeforeLogin.service
 }
 
+function service_onstartnetworkpre() {
+    cat <<EOF_UNIT > /etc/systemd/system/OnStartNetworkPre.service
+[Unit]
+Description=Exec scripts in $HOMEPATH/$ONSTART/network_pre
+# network-pre: применяем netplan/NM-профили ДО первого подъёма сети, чтобы
+# NetworkManager стартовал сразу с правильным конфигом, без churn
+# 'up с дефолтом -> reconfigure -> restart NM'. Скрипты в этой фазе НЕ должны
+# рассчитывать на уже поднятую сеть (никаких обращений к сети/restart NM).
+# Before=NetworkManager.service — явная гарантия порядка на случай, если NM
+# в дистрибутиве не упорядочен After=network-pre.target.
+DefaultDependencies=no
+After=local-fs.target MountHome.service
+Requires=MountHome.service
+Wants=network-pre.target
+Before=network-pre.target NetworkManager.service shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$ETCPATH/$EXECFILESINFOLDER $ONSTART/network_pre
+
+[Install]
+WantedBy=multi-user.target
+EOF_UNIT
+
+    chmod 644 /etc/systemd/system/OnStartNetworkPre.service
+}
+
 function service_onstartoneshot() {
     cat <<EOF_UNIT > /etc/systemd/system/OnStartOneShot.service
 [Unit]
 Description=Exec scripts in $HOMEPATH/$ONSTART/oneshot
 After=OnStartBeforeLogin.service network.target network-online.target
+# Гейтим display-manager за oneshot: hostname/сеть/preconfiguration должны быть
+# применены ДО старта lightdm, иначе смена hostname (50-sethostname.sh) под уже
+# запущенной X-сессией ломает авторизацию :0 и первый автологин падает.
+# Цена: lightdm ждёт network-online.target и все oneshot-скрипты.
+Before=display-manager.service
 
 [Service]
 Type=oneshot
@@ -1323,6 +1374,74 @@ EOF_UDEV
     chmod 0644 /etc/udev/rules.d/70-inauto-r8125.rules
 
     echo "[r8125] драйвер ${r8125_version} собран для ядер: ${target_kernels[*]}; r8169 оставлен для прочих Realtek"
+}
+
+function install_moxa_uport_driver() {
+    # Вендорный драйвер Moxa UPort 11x0 (USB-serial, mxu11x0) — для редких панелей
+    # с этими адаптерами. In-tree mxuport данное устройство не биндит. Kernel-модуль
+    # собираем ЗДЕСЬ (build-time): на immutable RAUC-панели тулчейна/headers в
+    # runtime нет. Модуль самодостаточен (прошивка вкомпилена), автозагрузка — по
+    # modalias (MODULE_DEVICE_TABLE, VID 0x110A) — на панелях без адаптера не грузится.
+    local src_dir="/root/drivers/mxu11x0/driver"
+    local kver build_dir kbuild
+    local built_count=0
+    local target_kernels=()
+    # GCC-14 (Ubuntu 24.04) промоутит в ошибки два предупреждения, на которые
+    # спотыкается драйвер 2023 г.: incompatible-pointer-types (break_ctl возвращает
+    # void, поле ждёт int — возврат break_ctl ядром игнорируется, безвредно) и
+    # empty-body (макрос dbg в if). Понижаем ТОЧЕЧНО, чтобы не маскировать прочее
+    # (реальные API-поломки — undefined symbol и т.п. — всё равно уронят сборку).
+    local kcflags="-Wno-error=incompatible-pointer-types -Wno-error=empty-body"
+
+    # Источник опционален: если prechroot его не заложил (драйвер выпилен из дерева) —
+    # НЕ валим сборку, просто пропускаем. Это не то же, что "собрался под 0 ядер" ниже.
+    if [[ ! -f "$src_dir/Makefile" ]]; then
+        echo "[moxa] исходники mxu11x0 не заложены ($src_dir) — драйвер пропущен"
+        return 0
+    fi
+
+    mapfile -t target_kernels < <(
+        find /lib/modules -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V
+    )
+    if [[ ${#target_kernels[@]} -eq 0 ]]; then
+        echo "[moxa] ERROR: в /lib/modules нет ни одного установленного ядра" >&2
+        exit 1
+    fi
+
+    apt-get install -y --no-install-recommends build-essential
+    for kver in "${target_kernels[@]}"; do
+        apt-get install -y --no-install-recommends "linux-headers-$kver" \
+            || echo "[moxa] WARNING: не удалось поставить linux-headers-$kver" >&2
+    done
+
+    for kver in "${target_kernels[@]}"; do
+        kbuild="/lib/modules/$kver/build"
+        build_dir="/tmp/mxu11x0-build-$kver"
+        if [[ ! -d "$kbuild" ]]; then
+            echo "[moxa] WARNING: нет $kbuild — пропускаю ядро $kver" >&2
+            continue
+        fi
+        # Свежая копия исходников на каждое ядро (чтобы .o от предыдущего не мешали).
+        rm -rf "$build_dir"
+        cp -a "$src_dir" "$build_dir"
+        if make -C "$kbuild" M="$build_dir" KCFLAGS="$kcflags" modules; then
+            install -D -m 0644 "$build_dir/mxu11x0.ko" \
+                "/lib/modules/$kver/kernel/drivers/usb/serial/mxu11x0.ko"
+            depmod -a "$kver"
+            built_count=$((built_count + 1))
+            echo "[moxa] mxu11x0.ko собран для ядра $kver"
+        else
+            echo "[moxa] ERROR: сборка mxu11x0 для ядра $kver не удалась" >&2
+        fi
+        rm -rf "$build_dir"
+    done
+
+    if [[ "$built_count" -eq 0 ]]; then
+        echo "[moxa] ERROR: mxu11x0 не собрался ни под одно ядро" >&2
+        exit 1
+    fi
+
+    echo "[moxa] mxu11x0 собран для ${built_count} ядра(ер); autoload по modalias (Moxa UPort 11x0, VID 0x110A)"
 }
 
 # ============================================================================

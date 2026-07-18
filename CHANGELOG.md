@@ -5,6 +5,65 @@
 
 ## [Unreleased]
 
+### Added — драйвер Moxa UPort 11x0 (USB-serial, build-time)
+- Для редких панелей с адаптерами Moxa UPort 11x0 (in-tree `mxuport` их не биндит). Вендорный `mxu11x0` занесён в репозиторий (`scripts/targets/rauc/drivers/mxu11x0/`, GPLv2) и собирается на этапе сборки образа (в runtime на immutable-панели тулчейна нет): `config.sh::install_moxa_uport_driver()` строит модуль под каждое целевое ядро (`make -C /lib/modules/<kver>/build`), ставит в `/lib/modules/.../kernel/drivers/usb/serial/` + `depmod`. GCC-14 понижается точечно (`-Wno-error=incompatible-pointer-types,empty-body` — драйвер 2023 г.). Автозагрузка по modalias (`MODULE_DEVICE_TABLE`, VID `0x110A`) — на панелях без адаптера не грузится. `build.sh::prechroot` заносит source в chroot (`/root/drivers`). Fail-hard, если модуль не собрался ни под одно ядро.
+
+### Fixed — timezone/NTP на immutable-панели (без timedatectl)
+- `timedatectl` на панели даёт `Access denied` (timedated/polkit без сессии/агента в boot-контексте). `005-time.sh` выставляет зону **прямым** `ln -sf /usr/share/zoneinfo/<tz> /etc/localtime`, NTP — `systemctl enable systemd-timesyncd` (оба без DBus). Добавлена чистка CR/пробелов из `staff/timezone` (CRLF-файл не проходил проверку zoneinfo).
+- **NTP-сервер параметризован:** новый per-site файл `staff/ntp-server` (рядом с `staff/timezone`), из него `005-time.sh` генерирует `/etc/systemd/timesyncd.conf` (`NTP=` + `FallbackNTP=`). Статический `staff/fs/etc/systemd/timesyncd.conf` удалён.
+
+### Changed — NetworkManager: no-auto-default генерируется скриптом, без autoconnect=false
+- `/etc/NetworkManager/conf.d/20-no-auto-default.conf` теперь генерируется в `network_pre/10-config-network.sh` (до старта NM) c одним `[main] no-auto-default=*`. Убран `[connection] autoconnect=false` (мешал автоподъёму реальных соединений → риск «панель без сети»). Статический файл в `staff/fs` удалён.
+
+### Removed — самостоятельный tar.zst-метод установки
+- Инсталлятор больше не собирается в `out/*.tar.zst` (метод «распаковать в /opt и запустить» не использовался). `build-installer-image.sh` публикует payload **директорией** `out/inauto-panel-installer-<…>/`, `build.sh::build_rauc_installer_iso` берёт её напрямую (`cp -a` вместо `tar -xf`). Из `.gitlab-ci.yml` убраны `*.tar.zst`/`.sha256` артефакты и неиспользуемый `INSTALLER=` dotenv. Удалён рунбук `install-from-installer-tar-zst.md`, вычищены ссылки в `factory-provisioning`/`release-workflow`/`field-migration`/`qemu-pc-efi-test`/`ci-pki-secrets`. Backup `/home/inauto` (`home-inauto.tar.zst`) не затронут.
+
+### Changed — актуальность пакетов образа (dist-upgrade)
+- В chroot добавлен `apt-get -y dist-upgrade` (после `apt-get update`, до установки ядра/драйверов) — база из `debootstrap` подтягивается до последних версий (вкл. `-security`/`-updates`; sources уже содержат их, пинов нет). Раньше базовые пакеты застревали на версиях момента debootstrap.
+
+### Fixed — сборочный ПК: утечка Docker-томов и общий кэш для worktree
+- **Утечка диска устранена:** `build-rauc-installer.sh` создавал per-version chroot-тома `livecd-<версия>-target/-installer` (~7 ГБ/сборку) и не удалял — они копились до сотен ГБ. Теперь `trap EXIT` их сносит (одноразовый scratch; `KEEP_BUILD_VOLUMES=1` — оставить для отладки).
+- **Общий кэш для worktree:** apt/Trivy-тома переведены на фиксированное имя (`livecd-apt-cache-<distro>`, `livecd-trivy-cache`) вместо `basename REPO_ROOT` → worktree/клоны делят `.deb`- и Trivy-кэш, не качают заново. chroot-том остаётся per-worktree (изоляция).
+- `--clean-cache` теперь чистит и Trivy-том (раньше не чистился ничем), и прунит осиротевшие project-тома других worktree (кроме chroot текущей сборки).
+
+### Fixed — автологин панели не срабатывал (падал в greeter)
+- **Протухший `.Xauthority` из kiosk-скелета.** `before_login/10-kiosk.sh` копировал `staff/kiosk/.*` в `/home/ubuntu`, затаскивая запечённый `.Xauthority` (X-cookie сборочного хоста) → XFCE-сессия не могла авторизоваться на `:0`, падала с кодом 1, LightDM откатывался к greeter. Файл удалён из скелета; `10-kiosk.sh` переписан на `rsync -a --exclude='.Xauthority' --exclude='.ICEauthority'` — заодно устранён баг `cp -rf .*`, который через `..` затаскивал в `/home/ubuntu` весь родительский `staff/` (включая ssh-ключи).
+- **Смена hostname под живой X-сессией.** `50-sethostname.sh` стоял в `oneshot` (после старта LightDM); смена имени инвалидировала X-cookie `:0` — первая автологин-сессия падала, работала только вторая. Перенесён в новую фазу `network_pre` (до NetworkManager и до X), задаёт имя через `/etc/hostname`+`hostname(1)` (не `hostnamectl` — на ранней фазе `DefaultDependencies=no` systemd-hostnamed/DBus может быть не поднят), читает `staff/hostname`, валидирует, на ошибке не роняет фазу.
+- `OnStartOneShot.service` объявлен `Before=display-manager.service` — UI ждёт полной пред-настройки; попутно убрана гонка «автостарт приложения раньше установки».
+
+### Added — фаза `on_start/network_pre` (сеть/имя до NetworkManager)
+- Новый юнит `OnStartNetworkPre.service` (`config.sh::service_onstartnetworkpre`): `DefaultDependencies=no`, `After=MountHome.service`, `Wants/Before=network-pre.target`, `Before=NetworkManager.service`; раннер выполняет `on_start/network_pre/*.sh`.
+- Сетевые скрипты перенесены из `oneshot` в `network_pre`: `10-config-network.sh` кладёт netplan из `staff/netplan/` и делает `netplan generate` **без `apply`** (NM подхватит при старте) — убран churn «сеть поднялась с дефолтом → reconfigure → restart NM», добавлен атомарный своп через staging; `03-fs-reload.sh` — fs-overlay + `daemon-reload`, без `nmcli delete`/`restart NetworkManager`.
+
+### Added — CIFS-automount сетевой папки Windows
+- Пакет `cifs-utils` в образ. Новый `oneshot/020-mount-winshare.sh` генерирует systemd `.mount`+`.automount` из `staff/winshare/winshare.conf` (+`credentials`, режим 600): монтирование по первому обращению (переживает выключенный ПК/сетевые сбои), `uid/gid=1000` для записи из-под `ubuntu`. Шаблоны `winshare.conf.example`/`credentials.example`; без реального `winshare.conf` — no-op.
+
+### Changed — провижининг из `staff/`, реструктуризация `on_start`
+- **timezone** вынесен в `oneshot/005-time.sh` (читает `staff/timezone`, дефолт `Europe/Moscow`, валидация по `/usr/share/zoneinfo`), туда же переехала NTP-синхронизация. Устранён конфликт: `90` и `100-preconfiguration.sh` задавали **разный** пояс, лексически побеждал `100`.
+- Инсталляторы `00-hasplm.sh`/`01-idmvs.sh` перенесены из `forking` (Type=forking для run-and-exit — семантически неверно) в `oneshot`.
+- SSH-ключи вынесены в `before_login/05-ssh-keys.sh` (root+ubuntu+svc_redcheck, `install -d -m700 / -m600` под sshd StrictModes); дублирование из `01`/`02` убрано.
+- Префиксы `oneshot/*` нормализованы до 3 цифр (`000/001/005/020/090/100`) — лексический `sort` раннера теперь совпадает с численным порядком.
+
+### Fixed — баги site-скриптов `on_start`
+- `01-add-redcheck-user.sh`: `sudo -aG sudo` (несуществующая команда) → `usermod -aG sudo`; `.ssh`/`authorized_keys` получают `700`/`600` и владельца (иначе sshd StrictModes игнорирует ключ); идемпотентное создание пользователя.
+- `00-rootpass.sh`: `sudo echo | passwd` → `chpasswd`.
+- `090-preconfiguration.sh`: получил недостающий `+x` — до этого раннер (`find -executable`) молча его пропускал (NTP/ICMP-воркэраунд не выполнялись); убран избыточный `restart systemd-timesyncd`; ICMP-drop оставлен как raw iptables с `TODO(firewall)` (ufw пока `disable` в `01-idmvs.sh`).
+- Все `on_start`-скрипты приведены к `set -euo pipefail`.
+
+### Removed — дубль в payload инсталлятора
+- Удалён `home-skel/distr/IDMVS/opt/IDMVS_Install_Temp/` (~99 МБ; `IDMVS.tar.gz` внутри уже распакованного `IDMVS/`, не используется boot-путём установки) — `distr/` ужался 721→623 МБ.
+
+### Changed — документация (docs/ + home-skel/README)
+- `docs/2026-04-20-immutable-panel-firmware-design.md`: фаза `network_pre`, юнит `OnStartNetworkPre.service`, порядок фаз `on_start` + гейтинг `Before=display-manager`.
+- `docs/runbooks/troubleshooting.md`: новая секция про несрабатывающий автологин (протухший `.Xauthority`, смена hostname); исправлен устаревший путь netplan (`staff/lxqt/netplan` → `staff/netplan`).
+- `docs/runbooks/factory-provisioning.md`: per-site `staff/timezone` и `staff/winshare/` + пункты чек-листа. `qemu-pc-efi-test.md`: `network_pre` в перечне фаз.
+- `home-skel/README.md`: фаза `network_pre`, per-site `staff/`-параметры, таблица примеров зон, раздел winshare.
+
+### Added — дефолтное наполнение /home/inauto при первой установке (home-skel)
+- Новый каталог `scripts/targets/rauc/installer/home-skel/` — файлы, которые заводской инсталлятор засевает в раздел `inauto-data` (`/home/inauto`) при **первой установке** панели. Структура повторяет `/home/inauto` (`on_start/{before_login,network_pre,oneshot,forking}`, `on_login`, `staff`, `config`); пустые каталоги держатся `.gitkeep`, а `README.md`/`.gitkeep` на панель не копируются.
+- `build-installer-image.sh` упаковывает `home-skel/` в payload (`inauto-installer/home-skel/`), вырезая служебные `README.md`/`.gitkeep`; если после вычистки не осталось реальных файлов — каталог в payload не включается (installer его просто пропускает).
+- `install-to-disk.sh` (секция 7.4) раскатывает `home-skel/` в свежий `inauto-data` **после** создания skeleton'а, но **до** restore backup'а — при миграции восстановленные пользовательские файлы перетирают дефолты (данные пользователя побеждают). Каталог опционален: старый payload без `home-skel` установку не ломает. Файлы копируются `cp -a` (сохранение прав — скрипты `on_start/*`/`on_login` должны быть закоммичены исполняемыми). Засев одноразовый: последующие RAUC-обновления firmware эти файлы не трогают.
+
 ### Added — подавление шума загрузки/выключения
 - `config.sh::quiet_boot_noise()` (вызывается из `customize_image()`) заносит `snd_hda_intel` в blacklist (`/etc/modprobe.d` + `install ... /bin/true`) — HDA-кодек на панелях не отвечает, из-за чего выключение стабильно тормозило на `azx_get_response timeout` (~3 сек); звук панелям не нужен.
 - На RAUC-target (`TARGET_FORMAT=rauc`) `casper-md5check.service` теперь маскируется через `systemctl mask` — это чисто live-ISO проверка контрольных сумм, на immutable-образе она всегда падала и засоряла лог загрузки.

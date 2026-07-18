@@ -1,0 +1,7 @@
+[Desktop Entry]
+Version=1.0.0
+Encoding=UTF-8
+Name=InMark
+Type=Application
+Exec=/home/inauto/inmark/start_app
+Icon=/home/inauto/inmark/app/data/icons/target.png

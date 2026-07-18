@@ -185,11 +185,8 @@ build-bundle:
       # Имя артефакта содержит все matrix-оси, чтобы parallel job'ы не
       # путали чужие bundle'ы (один ubuntu, другой debian).
       expected="out/inauto-panel-${TARGET_DISTRO}-${TARGET_ARCH}-${TARGET_PLATFORM}-${RAUC_BUNDLE_VERSION}.raucb"
-      installer="out/inauto-panel-installer-${TARGET_DISTRO}-${TARGET_ARCH}-${TARGET_PLATFORM}-${RAUC_BUNDLE_VERSION}.tar.zst"
       [[ -f "$expected" ]]  || { echo "bundle не найден: $expected"; exit 1; }
-      [[ -f "$installer" ]] || { echo "installer не найден: $installer"; exit 1; }
       echo "BUNDLE=$expected"  >  build.env
-      echo "INSTALLER=$installer" >> build.env
 
       # EXIT-trap удалит .tmp/pki; явный rm ниже — на случай, если runner
       # зачем-то перезапустит script-step без выхода из bash-процесса.
@@ -204,8 +201,6 @@ build-bundle:
     paths:
       - out/inauto-panel-*.raucb
       - out/inauto-panel-*.raucb.sha256
-      - out/inauto-panel-installer-*.tar.zst
-      - out/inauto-panel-installer-*.tar.zst.sha256
     expire_in: 30 days
     reports:
       dotenv: build.env
