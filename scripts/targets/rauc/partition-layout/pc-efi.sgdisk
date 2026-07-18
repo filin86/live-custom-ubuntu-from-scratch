@@ -1,0 +1,150 @@
+#!/bin/bash
+# GPT partition layout для TARGET_PLATFORM=pc-efi (UEFI PC).
+#
+# Создаёт семь разделов со стабильными GPT partlabels:
+#   efi_A   (512 MiB, ESP, FAT32)     — RAUC bootslot A: EFI-stub kernel + initrd
+#   efi_B   (512 MiB, ESP, FAT32)     — RAUC bootslot B
+#   rootfs_A (5 GiB,  raw)             — SquashFS байты slot A (RAUC пишет raw)
+#   rootfs_B (5 GiB,  raw)             — SquashFS байты slot B
+#   persist  (1 GiB,  ext4)            — explicit persistent state (bind-mount)
+#   container-store (variable ext4)    — /var/lib/docker + /var/lib/containerd
+#   inauto-data (rest, ext4)           — /home/inauto (site data, compose, Qt app)
+#
+# Вызов:
+#   TARGET_DEVICE=/dev/sda ./pc-efi.sgdisk
+#   ./pc-efi.sgdisk /dev/sda
+#
+# Управляющие переменные окружения:
+#   CONTAINER_STORE_SIZE   — явный размер container-store ("40G", "16G", "8G").
+#                            Если не задан, вычисляется по размеру диска:
+#                               >= 100 GiB  -> 40G
+#                               >=  64 GiB  -> 16G
+#                               >=  32 GiB  -> 8G
+#                               <   32 GiB  -> отказ (нужен явный product profile).
+#   SKIP_FORMAT            — если "1", не форматировать ext4/vfat-разделы
+#                            (только раскладка GPT). По умолчанию "0".
+#
+# Partlabels остаются стабильными именами для установленной системы, но сам
+# installer форматирует только разделы, найденные внутри выбранного TARGET_DEVICE.
+# Это защищает от случайного попадания в одноимённый slot на другом диске.
+
+set -euo pipefail
+
+TARGET_DEVICE="${1:-${TARGET_DEVICE:-}}"
+
+log() { echo "[pc-efi.sgdisk] $*"; }
+fail() { echo "[pc-efi.sgdisk] ERROR: $*" >&2; exit 1; }
+
+[[ -n "$TARGET_DEVICE" ]] || fail "TARGET_DEVICE не задан. Передайте через env или первым аргументом."
+[[ -b "$TARGET_DEVICE" ]] || fail "$TARGET_DEVICE не является block device."
+TARGET_DEVICE="$(readlink -f "$TARGET_DEVICE")"
+
+for tool in sgdisk partprobe udevadm blockdev mkfs.vfat mkfs.ext4 lsblk; do
+    command -v "$tool" >/dev/null 2>&1 || fail "Не найден инструмент '$tool'."
+done
+
+GIB=$((1024 * 1024 * 1024))
+
+parse_gib() {
+    local value="$1"
+    if [[ "$value" =~ ^([0-9]+)G$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+    else
+        fail "Ожидается размер в формате <N>G (целые GiB), получено: '$value'."
+    fi
+}
+
+DISK_BYTES=$(blockdev --getsize64 "$TARGET_DEVICE")
+DISK_GIB=$((DISK_BYTES / GIB))
+
+log "Диск: $TARGET_DEVICE, размер: ${DISK_GIB} GiB (${DISK_BYTES} байт)"
+
+if [[ -n "${CONTAINER_STORE_SIZE:-}" ]]; then
+    CSTORE_GIB=$(parse_gib "$CONTAINER_STORE_SIZE")
+    log "CONTAINER_STORE_SIZE передан явно: ${CSTORE_GIB} GiB"
+elif (( DISK_BYTES >= 100 * GIB )); then
+    CSTORE_GIB=40
+elif (( DISK_BYTES >= 64 * GIB )); then
+    CSTORE_GIB=16
+elif (( DISK_BYTES >= 32 * GIB )); then
+    CSTORE_GIB=8
+else
+    fail "Диск ${DISK_GIB} GiB меньше 32 GiB; автоматическая разметка pc-efi не поддерживается. Передайте CONTAINER_STORE_SIZE явно и используйте product-profile."
+fi
+
+# Фиксированный overhead: efi_A(0.5) + efi_B(0.5) + rootfs_A(5) + rootfs_B(5) + persist(1) = 12 GiB.
+FIXED_GIB=12
+REMAINING_GIB=$((DISK_GIB - FIXED_GIB - CSTORE_GIB))
+
+if (( REMAINING_GIB < 8 )); then
+    fail "На inauto-data остаётся ${REMAINING_GIB} GiB (< 8 GiB) при CONTAINER_STORE_SIZE=${CSTORE_GIB}G. Уменьшите container-store или возьмите больший диск."
+fi
+
+log "Layout: efi_A=512M efi_B=512M rootfs_A=5G rootfs_B=5G persist=1G container-store=${CSTORE_GIB}G inauto-data=${REMAINING_GIB}G"
+
+log "Очищаем GPT/MBR на $TARGET_DEVICE"
+sgdisk --zap-all "$TARGET_DEVICE" >/dev/null
+
+log "Создаём GPT-разделы"
+sgdisk \
+    --new=1:0:+512M --change-name=1:efi_A           --typecode=1:ef00 \
+    --new=2:0:+512M --change-name=2:efi_B           --typecode=2:ef00 \
+    --new=3:0:+5G   --change-name=3:rootfs_A        --typecode=3:8300 \
+    --new=4:0:+5G   --change-name=4:rootfs_B        --typecode=4:8300 \
+    --new=5:0:+1G   --change-name=5:persist         --typecode=5:8300 \
+    --new="6:0:+${CSTORE_GIB}G" --change-name=6:container-store --typecode=6:8300 \
+    --new=7:0:0     --change-name=7:inauto-data     --typecode=7:8300 \
+    "$TARGET_DEVICE" >/dev/null
+
+log "partprobe + udev settle"
+partprobe "$TARGET_DEVICE" || true
+udevadm settle --timeout=10 || true
+
+partition_path_by_label() {
+    local label="$1"
+    lsblk -rno PATH,PARTLABEL "$TARGET_DEVICE" \
+        | awk -v label="$label" '$2 == label { print $1; exit }'
+}
+
+# Ждём появления всех нужных partlabel'ов именно на TARGET_DEVICE.
+wait_for_partlabel() {
+    local label="$1"
+    local path
+    local i
+    for (( i = 0; i < 40; i++ )); do
+        path="$(partition_path_by_label "$label")"
+        if [[ -n "$path" && -b "$path" ]]; then
+            printf '%s\n' "$path"
+            return 0
+        fi
+        sleep 0.25
+    done
+    fail "Partlabel '$label' не появился на $TARGET_DEVICE после partprobe."
+}
+
+EFI_A_DEV="$(wait_for_partlabel efi_A)"
+EFI_B_DEV="$(wait_for_partlabel efi_B)"
+ROOTFS_A_DEV="$(wait_for_partlabel rootfs_A)"
+ROOTFS_B_DEV="$(wait_for_partlabel rootfs_B)"
+PERSIST_DEV="$(wait_for_partlabel persist)"
+CONTAINER_STORE_DEV="$(wait_for_partlabel container-store)"
+INAUTO_DATA_DEV="$(wait_for_partlabel inauto-data)"
+
+if [[ "${SKIP_FORMAT:-0}" == "1" ]]; then
+    log "SKIP_FORMAT=1 — форматирование пропущено"
+    exit 0
+fi
+
+log "Форматируем EFI-разделы как FAT32"
+mkfs.vfat -F 32 -n EFI_A "$EFI_A_DEV" >/dev/null
+mkfs.vfat -F 32 -n EFI_B "$EFI_B_DEV" >/dev/null
+
+log "Форматируем ext4-разделы (persist, container-store, inauto-data)"
+mkfs.ext4 -F -L persist         "$PERSIST_DEV" >/dev/null
+mkfs.ext4 -F -L container-store "$CONTAINER_STORE_DEV" >/dev/null
+mkfs.ext4 -F -L inauto-data     "$INAUTO_DATA_DEV" >/dev/null
+
+# Raw-слоты rootfs_A/rootfs_B НЕ форматируются: RAUC пишет в них SquashFS-байты.
+log "rootfs_A/rootfs_B оставлены без файловой системы (raw для RAUC): $ROOTFS_A_DEV $ROOTFS_B_DEV"
+
+log "Layout готов. Проверьте: sgdisk -p $TARGET_DEVICE"

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-labelledby="title desc">
+  <title id="title">Выбор папки для резервной копии</title>
+  <desc id="desc">Макет выбора папки для резервной копии на флешке.</desc>
+  <rect width="960" height="540" fill="#f5f7fb"/>
+  <text x="90" y="72" font-family="Arial, sans-serif" font-size="30" font-weight="700" fill="#1b2638">3. Резервная копия /home/inauto</text>
+  <rect x="90" y="110" width="360" height="285" rx="8" fill="#ffffff" stroke="#c7d0dd" stroke-width="2"/>
+  <text x="120" y="150" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#1b2638">Нужна копия?</text>
+  <text x="120" y="190" font-family="Arial, sans-serif" font-size="18" fill="#374151">Да — для рабочей панели</text>
+  <text x="120" y="220" font-family="Arial, sans-serif" font-size="18" fill="#374151">Нет — только для новой/тестовой</text>
+  <rect x="120" y="270" width="130" height="44" rx="6" fill="#2563eb"/>
+  <text x="168" y="298" font-family="Arial, sans-serif" font-size="19" font-weight="700" fill="#ffffff">Да</text>
+  <rect x="270" y="270" width="130" height="44" rx="6" fill="#f3f4f6" stroke="#c7d0dd"/>
+  <text x="322" y="298" font-family="Arial, sans-serif" font-size="19" fill="#374151">Нет</text>
+  <rect x="505" y="110" width="365" height="285" rx="8" fill="#ffffff" stroke="#c7d0dd" stroke-width="2"/>
+  <text x="535" y="150" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#1b2638">Папка для копии</text>
+  <rect x="535" y="180" width="300" height="46" rx="6" fill="#eef8ee" stroke="#7ab57a"/>
+  <text x="552" y="210" font-family="Arial, sans-serif" font-size="18" fill="#235d2b">/media/ubuntu/BACKUP/inauto-backup</text>
+  <text x="535" y="260" font-family="Arial, sans-serif" font-size="18" fill="#374151">Выберите папку на отдельной флешке.</text>
+  <text x="535" y="290" font-family="Arial, sans-serif" font-size="18" fill="#374151">Не выбирайте установочный ISO/CD-ROM.</text>
+  <text x="535" y="330" font-family="Arial, sans-serif" font-size="18" fill="#374151">Если папки нет, создайте её в файловом менеджере.</text>
+  <path d="M450 250 L505 250" stroke="#9ca3af" stroke-width="4" stroke-linecap="round"/>
+</svg>

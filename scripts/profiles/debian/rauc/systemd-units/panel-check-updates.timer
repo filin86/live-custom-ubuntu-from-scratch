@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic update check for RAUC panel
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+Persistent=true
+Unit=panel-check-updates.service
+
+[Install]
+WantedBy=timers.target

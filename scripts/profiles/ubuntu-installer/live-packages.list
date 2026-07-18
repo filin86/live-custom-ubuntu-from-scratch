@@ -1,0 +1,17 @@
+# Ubuntu live-stack for the factory installer ISO.
+# Same base as ubuntu/live-packages.list; udisks2 is NOT masked here
+# (the installer needs it to find and mount USB media with the payload).
+sudo
+casper
+network-manager
+locales
+grub-common
+grub-gfxpayload-lists
+grub-pc
+grub-pc-bin
+grub2-common
+grub-efi-amd64-signed
+shim-signed
+mtools
+memtest86+
+binutils

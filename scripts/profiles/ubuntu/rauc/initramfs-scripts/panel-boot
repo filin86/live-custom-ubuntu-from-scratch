@@ -1,0 +1,121 @@
+#!/bin/sh
+# initramfs-tools script, запускается на стадии local-bottom — то есть
+# ПОСЛЕ того, как standard mountroot смонтировал squashfs root в ${rootmnt}.
+#
+# Переделывает layout в immutable overlay:
+#  1) переносит squashfs из ${rootmnt} в /run/panel/lower;
+#  2) поверх него кладёт tmpfs overlay upper;
+#  3) монтирует /run/panel/persist (ext4);
+#  4) проецирует persistent entries через panel-init-persist-paths
+#     (dirs -> bind-mount, files -> symlink на /run/panel/persist/...);
+#  5) монтирует inauto-data -> /home/inauto;
+#  6) монтирует container-store -> /var/lib/inauto/container-store и bind-mount'ит
+#     docker/containerd roots;
+#  7) переносит готовый overlay в ${rootmnt} для switch_root.
+#
+# Требования к cmdline:
+#   kernel и/или initramfs должны суметь смонтировать squashfs root в ${rootmnt}
+#   (например, через root=PARTUUID=<...> rootfstype=squashfs ro)
+#   rauc.slot=system0|system1  (или A|B для U-Boot — не используется этим скриптом,
+#                               но RAUC клиент читает её для status/mark-good).
+#
+# Опциональная переменная cmdline:
+#   inauto.overlay_size=<size>   Размер tmpfs upper (по умолчанию 2G).
+
+set -eu
+
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case ${1:-} in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+# shellcheck source=/dev/null
+. /scripts/functions
+
+log_begin_msg "panel-boot: immutable rootfs setup"
+
+OVERLAY_SIZE="2G"
+for arg in $(cat /proc/cmdline); do
+    case "$arg" in
+        inauto.overlay_size=*)
+            OVERLAY_SIZE="${arg#inauto.overlay_size=}"
+            ;;
+    esac
+done
+
+wait_for_block() {
+    path="$1"
+    timeout_decis="${2:-40}"
+    i=0
+    while [ ! -b "$path" ] && [ "$i" -lt "$timeout_decis" ]; do
+        sleep 0.25
+        udevadm settle --timeout=1 >/dev/null 2>&1 || true
+        i=$((i + 1))
+    done
+    [ -b "$path" ]
+}
+
+for label in persist inauto-data container-store; do
+    if ! wait_for_block "/dev/disk/by-partlabel/$label"; then
+        panic "panel-boot: отсутствует обязательный раздел /dev/disk/by-partlabel/$label"
+    fi
+done
+
+PANEL_ROOT="/run/panel"
+mkdir -p "$PANEL_ROOT"
+
+# 1) squashfs rootfs (сейчас в ${rootmnt}) переносим в /run/panel/lower
+mkdir -p "$PANEL_ROOT/lower"
+mount --move "${rootmnt}" "$PANEL_ROOT/lower"
+
+# 2) tmpfs upper + overlay
+mkdir -p "$PANEL_ROOT/tmpfs"
+mount -t tmpfs -o "mode=0755,size=${OVERLAY_SIZE}" tmpfs "$PANEL_ROOT/tmpfs"
+mkdir -p "$PANEL_ROOT/tmpfs/upper" "$PANEL_ROOT/tmpfs/work"
+
+mkdir -p "$PANEL_ROOT/overlay"
+mount -t overlay overlay \
+    -o "lowerdir=${PANEL_ROOT}/lower,upperdir=${PANEL_ROOT}/tmpfs/upper,workdir=${PANEL_ROOT}/tmpfs/work" \
+    "$PANEL_ROOT/overlay"
+
+# 3) persist (ext4)
+mkdir -p "$PANEL_ROOT/persist"
+mount -t ext4 /dev/disk/by-partlabel/persist "$PANEL_ROOT/persist"
+
+# 4) project persist entries в overlay (инициализация дефолтов из lower при необходимости)
+if [ -x /sbin/panel-init-persist-paths ]; then
+    /sbin/panel-init-persist-paths \
+        "$PANEL_ROOT/persist" \
+        "$PANEL_ROOT/lower" \
+        "$PANEL_ROOT/overlay"
+else
+    panic "panel-boot: /sbin/panel-init-persist-paths не найден в initramfs"
+fi
+
+# 5) inauto-data -> /home/inauto
+mkdir -p "$PANEL_ROOT/overlay/home/inauto"
+mount -t ext4 /dev/disk/by-partlabel/inauto-data "$PANEL_ROOT/overlay/home/inauto"
+
+# 6) container-store + docker/containerd bind
+mkdir -p "$PANEL_ROOT/overlay/var/lib/inauto/container-store"
+mount -t ext4 /dev/disk/by-partlabel/container-store \
+    "$PANEL_ROOT/overlay/var/lib/inauto/container-store"
+
+mkdir -p "$PANEL_ROOT/overlay/var/lib/inauto/container-store/docker" \
+         "$PANEL_ROOT/overlay/var/lib/inauto/container-store/containerd"
+mkdir -p "$PANEL_ROOT/overlay/var/lib/docker" \
+         "$PANEL_ROOT/overlay/var/lib/containerd"
+
+mount --bind "$PANEL_ROOT/overlay/var/lib/inauto/container-store/docker" \
+             "$PANEL_ROOT/overlay/var/lib/docker"
+mount --bind "$PANEL_ROOT/overlay/var/lib/inauto/container-store/containerd" \
+             "$PANEL_ROOT/overlay/var/lib/containerd"
+
+# 7) переносим overlay в ${rootmnt}, чтобы initramfs-tools сделал switch_root в него
+mount --move "$PANEL_ROOT/overlay" "${rootmnt}"
+
+log_end_msg

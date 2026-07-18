@@ -1,0 +1,19 @@
+UI vesamenu.c32
+
+MENU TITLE Inautomatic Debian Boot Menu
+DEFAULT live
+TIMEOUT 30
+
+LABEL live
+    MENU LABEL Boot Inautomatic Debian
+    KERNEL /$LIVE_BOOT_DIR/vmlinuz
+    APPEND initrd=/$LIVE_BOOT_DIR/initrd.img boot=live config noprompt noeject toram quiet splash ---
+
+LABEL check
+    MENU LABEL Check disc for defects
+    KERNEL /$LIVE_BOOT_DIR/vmlinuz
+    APPEND initrd=/$LIVE_BOOT_DIR/initrd.img boot=live integrity-check quiet splash ---
+
+LABEL memtest
+    MENU LABEL Test memory Memtest86+
+    KERNEL /install/memtest86+.bin

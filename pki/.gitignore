@@ -1,0 +1,14 @@
+# NEVER commit keys/certs — this directory holds PKI material.
+*.key
+*.crt
+*.csr
+*.srl
+*.pem
+*.p12
+*.pfx
+*.der
+
+# Allow documentation and generator scripts
+!*.md
+!generate-*.sh
+!.gitignore

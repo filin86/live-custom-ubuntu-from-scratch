@@ -1,0 +1,17 @@
+# Debian live-stack + GRUB signed chain.
+sudo
+live-boot
+live-config
+live-tools
+network-manager
+locales
+grub-common
+grub-pc-bin
+grub2-common
+grub-efi-amd64-bin
+grub-efi-amd64-signed
+shim-signed
+mtools
+openssh-server
+memtest86+
+binutils
